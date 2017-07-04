@@ -79,6 +79,7 @@ def main(samp_size):
     N = all_images.shape[0]
     assert N == all_labels.shape[0]
 
+    random.seed(42)
     samp = random.sample(range(N), samp_size)
 
     samp_images = all_images[samp]
