@@ -9,7 +9,7 @@ from sklearn import manifold, datasets
 def main(in_name, out_name):
 
     f = h5py.File(in_name, "r")
-    X = f["X"].value.T
+    X = f["X"].value
     n_samples = X.shape[1]
     labels = f["labels"].value
 
@@ -41,7 +41,7 @@ def main(in_name, out_name):
 
 
 if __name__ == "__main__":
-    input_name = "mnist_2500.h5"
+    input_name = "mnist_10000.h5"
     output_name = input_name[:-3] + ".scikit.h5"
     main(input_name, output_name)
 

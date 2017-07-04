@@ -1,3 +1,5 @@
+#!/usr/bin/env julia
+
 using ProgressMeter
 using HDF5
 #using Gadfly
@@ -295,8 +297,11 @@ function rescale(A, dim::Integer=1)
     res
 end
 
-function main_test(in_name, out_name)
-    X = h5read(in_name, "X")
+function main_test(in_name)
+
+    out_name = in_name[1:end-3] * ".julia.h5"
+
+    X = map(Float64, h5read(in_name, "X")')
     labels = h5read(in_name, "labels")
 
     plotname = "mnist"
@@ -323,7 +328,7 @@ function main_test(in_name, out_name)
     #draw(PDF(plotname*".pdf", 10inch, 10inch), theplot)
 end
 
-
-main_test("mnist_2500.h5", "mnist_2500.julia.h5")
+main_test(ARGS[1])
+#main_test("mnist_100.h5", "mnist_100.julia.h5")
 
 

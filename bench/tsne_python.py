@@ -167,7 +167,7 @@ def tsne(X = Math.array([]), no_dims = 2, initial_dims = 50, perplexity = 30.0, 
 
 def main(in_name, out_name):
     f = h5py.File(input_name, "r")
-    X = f["X"].value.T
+    X = f["X"].value
     labels = f["labels"].value
 
     start = time.time()
@@ -182,9 +182,6 @@ def main(in_name, out_name):
     outf.attrs["input"] = in_name
     outf.attrs["time"] = (stop - start)
     outf.attrs["error"] = C
-
-    #Plot.scatter(Y[:,0], Y[:,1], 20, labels)
-    #Plot.show()
 
 
 if __name__ == "__main__":
