@@ -1,11 +1,11 @@
 module VPTrees
 
-import Base: search
+import Base: search, insert!, count
 
 export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
-export count, depth, make_vp_tree, insert!, search, closest
+export count, depth, make_vp_tree, insert!, search, searchall, closest
 
 const Sample = Int
 const Radius = Float64
@@ -139,6 +139,16 @@ function search(
     τ
 end
 
+function searchall(tree::VPTree, q::Sample, τ::Radius)
+    results = Vector{Tuple{Sample, Radius}}()
+    search(tree, q, τ) do p, d
+        p != q && push!(results, (p, d))
+        τ
+    end
+    sort!(results, by=x -> x[:2])
+    results
+end
+
 function closest(tree::VPTree, q::Sample)
     best_p = 0
     best_d = Inf
@@ -152,7 +162,6 @@ function closest(tree::VPTree, q::Sample)
     (best_p, best_d)
 end
 
-
 function verify(t::VPTree)
     eachnode(t) do node
         if !isnull(t.left)
@@ -163,43 +172,6 @@ function verify(t::VPTree)
         end
     end
 end
-
-
-function test()
-
-    data = collect(1:10000)
-    dist(i, j) = Float64(abs(data[i] - data[j]))
-
-    tree = make_vp_tree(dist, data)
-
-    search(tree, 50, 5.0) do p, x
-        println("$p : $x")
-        5.0
-    end
-
-    stuff = collect(10001:20000)
-    shuffle!(stuff)
-
-    for i in 10001:20000
-        push!(data, i)
-    end
-    for i in stuff
-        insert!(tree, i)
-    end
-
-    search(tree, 150, 5.0) do p, x
-        println("$p : $x")
-        5.0
-    end
-
-    println("depth = $(depth(tree))")
-
-    println("closest to 15000 = $(closest(tree, 15000))")
-
-end
-
-
-test()
 
 end # module
 
