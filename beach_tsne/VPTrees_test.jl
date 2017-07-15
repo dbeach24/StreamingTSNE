@@ -2,7 +2,7 @@ using VPTrees
 using Base.Test
 
 
-@testset "VPTree basic operations" begin
+@testset "VPTree prebuild tests" begin
 
     # setup tree
     ids  = [1,   2,    3,   4,    5,   6,   7,   8,    9,    10]
@@ -16,7 +16,33 @@ using Base.Test
 
     @test searchall(tree, 8, 4.0) == [(9, 1.5), (10, 3.25), (7, 3.5)]
 
+end
 
+@testset "VPTree insert tests" begin
+
+    ids = Vector{Int}()
+    data = Vector{Float64}()    
+    dist(i, j) = Float64(abs(data[i] - data[j]))
+    tree = make_vp_tree(dist, ids)
+
+    @test count(tree) == 0
+
+    # setup tree
+    add_ids  = [1,   2,    3,   4,    5,   6,   7,   8,    9,    10]
+    add_data = [0.5, 1.0,  3.0, 3.1,  4.5, 5.5, 6.5, 10.0, 11.5, 13.25]
+    N = length(add_ids)
+
+    for i in 1:N
+        push!(ids, add_ids[i])
+        push!(data, add_data[i])
+        insert!(tree, add_ids[i])
+    end
+
+    @test count(tree) == 10
+    @test closest(tree, 8)[1] == 9
+    @test closest(tree, 3)[1] == 4
+
+    @test searchall(tree, 8, 4.0) == [(9, 1.5), (10, 3.25), (7, 3.5)]
 end
 
 @testset "Torture" begin
