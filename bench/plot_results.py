@@ -16,17 +16,16 @@ def build_plot(fname, ax):
     Y = f["Y"].value
     labels = f["labels"].value
 
-    print Y.shape
-    print labels.shape
 
-    algo = "foo"
-    infile = "bar"
-    #algo = f.attrs["algo"]
-    #infile = f.attrs["input"]
+    #algo = "foo"
+    #infile = "bar"
+    algo = f.attrs["algo"]
+    infile = f.attrs["input"]
+    N = Y.shape[0]
     time = f.attrs["time"]
     error = f.attrs["error"]
 
-    title = "%s on %s\ntime=%5.1f s; kl=%.4g" % (algo, infile, time, error)
+    title = "%s on %s\nN=%d, time=%5.1f s; kl=%.4g" % (algo, infile, N, time, error)
 
     plt.scatter(Y[:, 0], Y[:, 1], c=labels, cmap=plt.cm.Spectral)
     plt.title(title)

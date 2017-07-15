@@ -2,6 +2,8 @@
 
 using ProgressMeter
 using HDF5
+using ArgParse
+
 #using Gadfly
 
 # Numpy Math.sum => axis = 0 => sum down the columns. axis = 1 => sum along the rows
@@ -297,17 +299,10 @@ function rescale(A, dim::Integer=1)
     res
 end
 
-function main_test(in_name)
+function main_test(infile, outfile; initial_dims=50, iterations=1000, perplexity=20)
 
-    out_name = in_name[1:end-3] * ".julia.h5"
-
-    X = map(Float64, h5read(in_name, "X")')
-    labels = h5read(in_name, "labels")
-
-    plotname = "mnist"
-    initial_dims = 50
-    iterations = 1000
-    perplexity = 20
+    X = map(Float64, h5read(infile, "X")')
+    labels = h5read(infile, "labels")
 
     println("X dimensions are: ", size(X))
     start = time()
@@ -315,20 +310,48 @@ function main_test(in_name)
     stop = time()
     println("Y dimensions are: ", size(Y))
 
-    h5open(out_name, "w") do file
+    h5open(outfile, "w") do file
         write(file, "Y", Y')
         write(file, "labels", labels)
         attrs(file)["algo"] = "Julia N^2"
-        attrs(file)["input"] = in_name
+        attrs(file)["input"] = infile
         attrs(file)["time"] = (stop - start)
         attrs(file)["error"] = last_kldiv
     end
 
-    #theplot = plot(x=Y[:,1], y=Y[:,2], color=labels, Scale.color_discrete())
-    #draw(PDF(plotname*".pdf", 10inch, 10inch), theplot)
+    # compensate for broken Python HDF5
+    # (by writing string attributes using Python!)
+    run(`./h5writeattr.py $(outfile) "algo=Julia N^2" "input=$(infile)"`)
+
 end
 
-main_test(ARGS[1])
-#main_test("mnist_100.h5", "mnist_100.julia.h5")
+function main()
+    s = ArgParseSettings(description = "tsne_julia.jl")
+
+    @add_arg_table s begin
+        "infile"
+        "outfile"
+        "--initial_dims"
+            arg_type = Int
+            default = 50
+        "--iterations"
+            arg_type = Int
+            default = 1000
+        "--perplexity"
+            arg_type = Int
+            default = 20
+    end
+
+    args = parse_args(s) # the result is a Dict{String,Any}
+
+    main_test(args["infile"], args["outfile"],
+        initial_dims=args["initial_dims"],
+        iterations=args["iterations"],
+        perplexity=args["perplexity"]
+    )
+
+end
+
+main()
 
 

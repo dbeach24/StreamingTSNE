@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 #
 #  tsne.py
 #
@@ -11,9 +12,9 @@
 #  Created by Laurens van der Maaten on 20-12-08.
 #  Copyright (c) 2008 Tilburg University. All rights reserved.
 import time
-import h5py
+import argparse
 import numpy as Math
-import pylab as Plot
+import h5py
 
 def Hbeta(D = Math.array([]), beta = 1.0):
     """Compute the perplexity and the P-row for a specific value of the precision of a Gaussian distribution."""
@@ -108,6 +109,7 @@ def tsne(X = Math.array([]), no_dims = 2, initial_dims = 50, perplexity = 30.0, 
 
     # Initialize variables
     X = pca(X, initial_dims).real;
+
     (n, d) = X.shape;
     initial_momentum = 0.5;
     final_momentum = 0.8;
@@ -165,17 +167,18 @@ def tsne(X = Math.array([]), no_dims = 2, initial_dims = 50, perplexity = 30.0, 
     return Y, C
 
 
-def main(in_name, out_name):
-    f = h5py.File(input_name, "r")
-    X = f["X"].value
+def run(in_name, out_name, perplexity=20.0, iterations=1000):
+
+    f = h5py.File(in_name, "r")
+    X = Math.array(f["X"].value, dtype=float) / 255.0
     labels = f["labels"].value
 
     start = time.time()
-    Y, C = tsne(X, 2, 50, 20.0)
+    Y, C = tsne(X, 2, initial_dims=50, perplexity=perplexity, max_iter=iterations)
     stop = time.time()
     print "Elapsed time: %6.2f" % (stop - start)
 
-    outf = h5py.File(output_name, "w")
+    outf = h5py.File(out_name, "w")
     outf["Y"] = Y
     outf["labels"] = labels
     outf.attrs["algo"] = "Python N^2"
@@ -184,7 +187,22 @@ def main(in_name, out_name):
     outf.attrs["error"] = C
 
 
+def main():
+
+    parser = argparse.ArgumentParser()
+    add = parser.add_argument
+
+    add("infile", type=str)
+    add("outfile", type=str)
+    add("--perplexity", type=float, default=20.0)
+    add("--iterations", type=int, default=1000)
+
+    args = parser.parse_args()
+    run(args.infile, args.outfile,
+        perplexity=args.perplexity,
+        iterations=args.iterations,
+    )
+
+
 if __name__ == "__main__":
-    input_name = "mnist_2500.h5"
-    output_name = input_name[:-3] + ".python.h5"
-    main(input_name, output_name)
+    main()
