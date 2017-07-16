@@ -1,14 +1,17 @@
 module VPTrees
 
-import Base: search, insert!, count
+import Base: search, insert!, count, collect
 
 export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
-export count, depth, make_vp_tree, insert!, search, searchall, closest
+export count, depth, eachkey, eachnode, collect
+export make_vp_tree, insert!, search, searchall, closest
 
 const Sample = Int
 const Radius = Float64
+
+const REBALANCE_DEPTH = 5
 
 immutable NodeStats
     count::Int
@@ -30,29 +33,61 @@ type VPTree
     root::VPNodePtr
 end
 
+stats() = NodeStats(1, 1)
 stats(n::VPNode) = n.stats
 stats(n::VPNodePtr) = isnull(n) ? NodeStats(0, 0) : stats(get(n))
-stats() = NodeStats(1, 1)
 stats(l::NodeStats, r::NodeStats) = NodeStats(1 + count(l) + count(r), 1 + max(depth(l), depth(r)))
 stats(l::VPNodePtr, r::VPNodePtr) = stats(stats(l), stats(r))
 
+"""
+    count(tree|node)
+
+Return the total number of samples in a given tree or subtree.
+"""
 count(t::VPTree) = count(t.root)
 count(n::VPNode) = count(n.stats)
 count(n::VPNodePtr) = isnull(n) ? 0 : count(get(n))
 count(s::NodeStats) = s.count
 
+"""
+    depth(tree|node)
+
+Return the depth of the given tree or subtree.
+"""
 depth(t::VPTree) = depth(t.root)
 depth(n::VPNode) = depth(n.stats)
 depth(n::VPNodePtr) = isnull(n) ? 0 : depth(get(n))
 depth(s::NodeStats) = s.depth
 
-eachkey(f::Function, t::VPTree) = eachnode(n -> f(n.p), t)
+"""
+    eachkey(f, tree|node)
+    eachnode(f, tree|node)
+
+Generically treverse tree or subtree, applying `f(n)` to each key or node.
+"""
+eachkey(f::Function, t::VPTree) = eachnode(x -> f(x.p), t)
+eachkey(f::Function, n::VPNodePtr) = eachnode(x -> f(x.p), n)
 eachnode(f::Function, t::VPTree) = eachnode(f, t.root)
-eachnode(f::Function, t::VPNodePtr) = !isnull(t) && eachnode(f, get(t))
-function eachnode(result::Vector{Sample}, t::VPNode)
+eachnode(f::Function, n::VPNodePtr) = !isnull(n) ? eachnode(f, get(n)) : nothing
+function eachnode(f::Function, t::VPNode)
     f(t)
     eachnode(f, t.left)
     eachnode(f, t.right)
+    nothing
+end
+
+"""
+    collect(tree|node)
+
+Return all samples from a tree or subtree as a vector.
+"""
+collect(t::VPTree) = collect(t.root)
+function collect(n::VPNodePtr)
+    result = Vector{Sample}()
+    eachkey(n) do s
+        push!(result, s)
+    end
+    result
 end
 
 make_vp_tree(dist::Function, S::Vector{Sample}=Vector{Sample}()) = VPTree(dist, make_vp_node(S, dist))
@@ -81,9 +116,9 @@ end
 
 select_vp(S, dist) = rand(S)
 
-
 function insert!(t::VPTree, s::Sample)
     t.root = insert(t.root, s, t.dist)
+    t
 end
 
 function insert(n::VPNodePtr, s::Sample, dist::Function) :: VPNodePtr

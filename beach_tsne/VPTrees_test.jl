@@ -16,6 +16,10 @@ using Base.Test
 
     @test searchall(tree, 8, 4.0) == [(9, 1.5), (10, 3.25), (7, 3.5)]
 
+    alldata = collect(tree)
+    sort!(alldata)
+    @test alldata == ids
+
 end
 
 @testset "VPTree insert tests" begin
@@ -43,6 +47,11 @@ end
     @test closest(tree, 3)[1] == 4
 
     @test searchall(tree, 8, 4.0) == [(9, 1.5), (10, 3.25), (7, 3.5)]
+
+    alldata = collect(tree)
+    sort!(alldata)
+    @test alldata == add_ids
+
 end
 
 @testset "Torture" begin
