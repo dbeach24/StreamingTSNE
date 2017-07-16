@@ -1,12 +1,12 @@
 module VPTrees
 
-import Base: search, insert!, count, collect
+import Base: search, insert!, count, collect, delete!
 
 export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
 export count, depth, eachkey, eachnode, collect
-export make_vp_tree, insert!, search, searchall, closest
+export make_vp_tree, insert!, search, searchall, closest, delete!
 
 const Sample = Int
 const Radius = Float64
@@ -21,6 +21,7 @@ end
 immutable VPNode
     p::Sample
     μ::Radius
+    active::Bool
     stats::NodeStats
     left::Nullable{VPNode}
     right::Nullable{VPNode}
@@ -70,7 +71,7 @@ eachkey(f::Function, n::VPNodePtr) = eachnode(x -> f(x.p), n)
 eachnode(f::Function, t::VPTree) = eachnode(f, t.root)
 eachnode(f::Function, n::VPNodePtr) = !isnull(n) ? eachnode(f, get(n)) : nothing
 function eachnode(f::Function, t::VPNode)
-    f(t)
+    t.active && f(t)
     eachnode(f, t.left)
     eachnode(f, t.right)
     nothing
@@ -92,7 +93,7 @@ end
 
 make_vp_tree(dist::Function, S::Vector{Sample}=Vector{Sample}()) = VPTree(dist, make_vp_node(S, dist))
 
-make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr) = VPNode(p, μ, stats(left, right), left, right)
+make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr) = VPNode(p, μ, true, stats(left, right), left, right)
 
 function make_vp_node(S::Vector{Sample}, dist::Function) :: VPNodePtr
     isempty(S) && return nothing
@@ -144,6 +145,26 @@ function insert(n::VPNodePtr, s::Sample, dist::Function) :: VPNodePtr
     end
 end
 
+function delete!(t::VPTree, q::Sample)
+    t.root = delete!(t.root, q, t.dist)
+    t
+end
+
+delete!(n::VPNodePtr, q::Sample, dist::Function) :: VPNodePtr = !isnull(n) ? delete!(get(n), q, dist) : nothing
+function delete!(n::VPNode, q::Sample, dist::Function)
+    l = n.left
+    r = n.right
+    if n.p == q
+        return VPNode(n.p, n.μ, false, n.stats, l, r)
+    end
+    x = dist(n.p, q)
+    if x < n.μ
+        l = delete!(l, q, dist)
+    else
+        r = delete!(r, q, dist)
+    end
+    VPNode(n.p, n.μ, true, n.stats, l, r)
+end
 
 function search(f::Function, t::VPTree, q::Sample, τ::Radius)
     search(f, t.root, q, τ, t.dist)
@@ -159,16 +180,19 @@ function search(
     isnull(node) && return τ
 
     n = get(node)
-    x = dist(q, n.p)
-    if x < τ
+    x = dist(n.p, q)
+    if n.active && x < τ
+        # include this node in the search
         τ = f(n.p, x)
     end
     τ < 0 && return τ
     if x - τ < n.μ
+        # search left (inside)
         τ = search(f, n.left, q, τ, dist)
         τ < 0 && return τ
     end
     if x + τ >= n.μ
+        # search rigth (outside)
         τ = search(f, n.right, q, τ, dist)
     end
     τ

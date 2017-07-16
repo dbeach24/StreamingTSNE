@@ -43,14 +43,19 @@ end
     end
 
     @test count(tree) == 10
+
+    # test search functionality
     @test closest(tree, 8)[1] == 9
     @test closest(tree, 3)[1] == 4
-
     @test searchall(tree, 8, 4.0) == [(9, 1.5), (10, 3.25), (7, 3.5)]
 
+    # test collect functionality
     alldata = collect(tree)
     sort!(alldata)
     @test alldata == add_ids
+
+    delete!(tree, 9)
+    @test searchall(tree, 8, 4.0) == [(10, 3.25), (7, 3.5)]
 
 end
 
