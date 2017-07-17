@@ -13,7 +13,6 @@ const Radius = Float64
 
 # Parameters to control the partial auto-rebalancing
 const REBALANCE_DEPTH = 5
-const MAX_DEL = 5000
 const MIN_COUNT = 12
 
 immutable NodeStats
