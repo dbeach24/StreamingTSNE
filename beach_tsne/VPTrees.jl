@@ -5,26 +5,30 @@ import Base: search, insert!, count, collect, delete!
 export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
-export count, depth, eachkey, eachnode, collect
+export count, depth, eachkey, eachnode, collect, garbage!
 export make_vp_tree, insert!, search, searchall, closest, delete!
 
 const Sample = Int
 const Radius = Float64
 
+# Parameters to control the partial auto-rebalancing
 const REBALANCE_DEPTH = 5
+const MAX_DEL = 5000
+const MIN_COUNT = 12
 
 immutable NodeStats
-    count::Int
+    total::Int
     depth::Int
+    ndel::Int
 end
 
 immutable VPNode
     p::Sample
     μ::Radius
-    active::Bool
     stats::NodeStats
     left::Nullable{VPNode}
     right::Nullable{VPNode}
+    active::Bool
 end
 
 const VPNodePtr = Nullable{VPNode}
@@ -32,23 +36,28 @@ const VPNodePtr = Nullable{VPNode}
 type VPTree
     dist::Function
     root::VPNodePtr
+    garbage::Vector{Sample}
 end
 
-stats() = NodeStats(1, 1)
+stats() = NodeStats(1, 1, 0)
 stats(n::VPNode) = n.stats
-stats(n::VPNodePtr) = isnull(n) ? NodeStats(0, 0) : stats(get(n))
-stats(l::NodeStats, r::NodeStats) = NodeStats(1 + count(l) + count(r), 1 + max(depth(l), depth(r)))
-stats(l::VPNodePtr, r::VPNodePtr) = stats(stats(l), stats(r))
+stats(n::VPNodePtr) = isnull(n) ? NodeStats(0, 0, 0) : stats(get(n))
+stats(l::NodeStats, r::NodeStats, active::Bool) = NodeStats(
+    1 + count(l) + count(r),
+    1 + max(depth(l), depth(r)),
+    ndel(l) + ndel(r) + (!active ? 1 : 0)
+)
+stats(l::VPNodePtr, r::VPNodePtr, active::Bool) = stats(stats(l), stats(r), active)
 
 """
     count(tree|node)
 
-Return the total number of samples in a given tree or subtree.
+Return the total number of active samples in a given tree or subtree.
 """
 count(t::VPTree) = count(t.root)
 count(n::VPNode) = count(n.stats)
 count(n::VPNodePtr) = isnull(n) ? 0 : count(get(n))
-count(s::NodeStats) = s.count
+count(s::NodeStats) = s.total - s.ndel
 
 """
     depth(tree|node)
@@ -60,20 +69,25 @@ depth(n::VPNode) = depth(n.stats)
 depth(n::VPNodePtr) = isnull(n) ? 0 : depth(get(n))
 depth(s::NodeStats) = s.depth
 
+ndel(t::VPTree) = ndel(t.root)
+ndel(n::VPNode) = ndel(n.stats)
+ndel(n::VPNodePtr) = isnull(n) ? 0 : ndel(get(n))
+ndel(s::NodeStats) = s.ndel
+
 """
     eachkey(f, tree|node)
     eachnode(f, tree|node)
 
 Generically treverse tree or subtree, applying `f(n)` to each key or node.
 """
-eachkey(f::Function, t::VPTree) = eachnode(x -> f(x.p), t)
-eachkey(f::Function, n::VPNodePtr) = eachnode(x -> f(x.p), n)
+eachkey(f::Function, t::VPTree) = eachnode(x -> x.active && f(x.p), t)
+eachkey(f::Function, n::VPNodePtr) = eachnode(x -> x.active && f(x.p), n)
 eachnode(f::Function, t::VPTree) = eachnode(f, t.root)
 eachnode(f::Function, n::VPNodePtr) = !isnull(n) ? eachnode(f, get(n)) : nothing
-function eachnode(f::Function, t::VPNode)
-    t.active && f(t)
-    eachnode(f, t.left)
-    eachnode(f, t.right)
+function eachnode(f::Function, n::VPNode)
+    f(n)
+    eachnode(f, n.left)
+    eachnode(f, n.right)
     nothing
 end
 
@@ -91,9 +105,9 @@ function collect(n::VPNodePtr)
     result
 end
 
-make_vp_tree(dist::Function, S::Vector{Sample}=Vector{Sample}()) = VPTree(dist, make_vp_node(S, dist))
+make_vp_tree(dist::Function, S::Vector{Sample}=Vector{Sample}()) = VPTree(dist, make_vp_node(S, dist), Vector{Sample}())
 
-make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr) = VPNode(p, μ, true, stats(left, right), left, right)
+make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr) = VPNode(p, μ, stats(left, right, true), left, right, true)
 
 function make_vp_node(S::Vector{Sample}, dist::Function) :: VPNodePtr
     isempty(S) && return nothing
@@ -117,12 +131,25 @@ end
 
 select_vp(S, dist) = rand(S)
 
+function garbage!(t::VPTree)
+    old_garbage = t.garbage
+    t.garbage = Vector{Sample}()
+    old_garbage
+end
+
+function rebuild(t::VPTree)
+    t.root = rebuild(t.root, t.garbage, t.dist)
+end
+
+rebuild(n::VPNodePtr, garbage::Vector{Sample}, dist::Function) = make_vp_node(collect_garbage(n, garbage), dist)
+
+
 function insert!(t::VPTree, s::Sample)
-    t.root = insert(t.root, s, t.dist)
+    t.root = insert(t.root, s, t.garbage, t.dist)
     t
 end
 
-function insert(n::VPNodePtr, s::Sample, dist::Function) :: VPNodePtr
+function insert(n::VPNodePtr, s::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr
     isnull(n) && return make_vp_node(s, 0.0, VPNodePtr(), VPNodePtr())
 
     node = get(n)
@@ -131,40 +158,75 @@ function insert(n::VPNodePtr, s::Sample, dist::Function) :: VPNodePtr
 
     if count(node) == 1
         # this is a leaf node, set radius and add as right child
-        make_vp_node(node.p, x, node.left, insert(node.right, s, dist))
+        make_vp_node(node.p, x, node.left, insert(node.right, s, garbage, dist))
     else
         # this is a non-leaf node... navigate to appropriate child
         left = node.left
         right = node.right
         if x < node.μ
-            left = insert(node.left, s, dist)
+            left = insert(node.left, s, garbage, dist)
         else
-            right = insert(node.right, s, dist)
+            right = insert(node.right, s, garbage, dist)
         end
-        make_vp_node(node.p, node.μ, left, right)
+        check_rebuild(VPNodePtr(make_vp_node(node.p, node.μ, left, right)), garbage, dist)
     end
 end
 
 function delete!(t::VPTree, q::Sample)
-    t.root = delete!(t.root, q, t.dist)
+    t.root = delete!(t.root, q, t.garbage, t.dist)
     t
 end
 
-delete!(n::VPNodePtr, q::Sample, dist::Function) :: VPNodePtr = !isnull(n) ? delete!(get(n), q, dist) : nothing
-function delete!(n::VPNode, q::Sample, dist::Function)
+delete!(n::VPNodePtr, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr = !isnull(n) ? delete!(get(n), q, garbage, dist) : nothing
+function delete!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr
     l = n.left
     r = n.right
     if n.p == q
-        return VPNode(n.p, n.μ, false, n.stats, l, r)
+        if isnull(l) && isnull(r)
+            push!(garbage, n.p)
+            #println("leaf deleted")
+            return nothing
+        end
+        return VPNode(n.p, n.μ, stats(l, r, false), l, r, false)
     end
     x = dist(n.p, q)
     if x < n.μ
-        l = delete!(l, q, dist)
+        l = delete!(l, q, garbage, dist)
     else
-        r = delete!(r, q, dist)
+        r = delete!(r, q, garbage, dist)
     end
-    VPNode(n.p, n.μ, true, n.stats, l, r)
+    check_rebuild(VPNodePtr(VPNode(n.p, n.μ, stats(l, r, n.active), l, r, n.active)), garbage, dist)
+    #VPNodePtr(VPNode(n.p, n.μ, stats(l, r, n.active), l, r, n.active))
 end
+
+
+function check_rebuild(n::VPNodePtr, garbage::Vector{Sample}, dist::Function)
+    if needs_rebuild(n)
+        rebuild(n, garbage, dist)
+    else
+        n
+    end
+end
+
+needs_rebuild(n::VPNodePtr) = !isnull(n) ? needs_rebuild(get(n)) : false
+
+function collect_garbage(n::VPNodePtr, garbage::Vector{Sample})
+    samples = Vector{Sample}()
+    eachnode(n) do node
+        if node.active
+            push!(samples, node.p)
+        else
+            push!(garbage, node.p)
+        end
+        nothing
+    end
+    samples
+end
+
+function needs_rebuild(n::VPNode)
+    depth(n) == REBALANCE_DEPTH && count(n) < MIN_COUNT
+end
+
 
 function search(f::Function, t::VPTree, q::Sample, τ::Radius)
     search(f, t.root, q, τ, t.dist)
