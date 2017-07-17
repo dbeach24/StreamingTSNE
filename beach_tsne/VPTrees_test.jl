@@ -81,10 +81,12 @@ end
     end
     @time for i in stuff
         delete!(tree, i - 10000)
+        @assert count(tree) == 9999
         insert!(tree, i)
+        @assert count(tree) == 10000
     end
 
-    #@test count(tree) == 10000
+    @test count(tree) == 10000
 
     #stuff = searchall(tree, 150, 5.5)
     #@test length(stuff) == 10

@@ -43,11 +43,16 @@ stats() = NodeStats(1, 1, 0)
 stats(n::VPNode) = n.stats
 stats(n::VPNodePtr) = isnull(n) ? NodeStats(0, 0, 0) : stats(get(n))
 stats(l::NodeStats, r::NodeStats, active::Bool) = NodeStats(
-    1 + count(l) + count(r),
+    1 + size(l) + size(r),
     1 + max(depth(l), depth(r)),
     ndel(l) + ndel(r) + (!active ? 1 : 0)
 )
 stats(l::VPNodePtr, r::VPNodePtr, active::Bool) = stats(stats(l), stats(r), active)
+
+size(t::VPTree) = size(t.root)
+size(n::VPNode) = size(n.stats)
+size(n::VPNodePtr) = isnull(n) ? 0 : size(get(n))
+size(s::NodeStats) = s.total
 
 """
     count(tree|node)
@@ -107,7 +112,7 @@ end
 
 make_vp_tree(dist::Function, S::Vector{Sample}=Vector{Sample}()) = VPTree(dist, make_vp_node(S, dist), Vector{Sample}())
 
-make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr) = VPNode(p, μ, stats(left, right, true), left, right, true)
+make_vp_node(p::Sample, μ::Radius, left::VPNodePtr, right::VPNodePtr, active::Bool=true) = VPNode(p, μ, stats(left, right, active), left, right, active)
 
 function make_vp_node(S::Vector{Sample}, dist::Function) :: VPNodePtr
     isempty(S) && return nothing
@@ -156,9 +161,9 @@ function insert(n::VPNodePtr, s::Sample, garbage::Vector{Sample}, dist::Function
 
     x = dist(node.p, s)
 
-    if count(node) == 1
+    if size(node) == 1
         # this is a leaf node, set radius and add as right child
-        make_vp_node(node.p, x, node.left, insert(node.right, s, garbage, dist))
+        make_vp_node(node.p, x, node.left, insert(node.right, s, garbage, dist), node.active)
     else
         # this is a non-leaf node... navigate to appropriate child
         left = node.left
@@ -168,7 +173,7 @@ function insert(n::VPNodePtr, s::Sample, garbage::Vector{Sample}, dist::Function
         else
             right = insert(node.right, s, garbage, dist)
         end
-        check_rebuild(VPNodePtr(make_vp_node(node.p, node.μ, left, right)), garbage, dist)
+        check_rebuild(VPNodePtr(make_vp_node(node.p, node.μ, left, right, node.active)), garbage, dist)
     end
 end
 
@@ -183,11 +188,11 @@ function delete!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) 
     r = n.right
     if n.p == q
         if isnull(l) && isnull(r)
+            # this is a leaf node -- delete immediately
             push!(garbage, n.p)
-            #println("leaf deleted")
             return nothing
         end
-        return VPNode(n.p, n.μ, stats(l, r, false), l, r, false)
+        return check_rebuild(VPNodePtr(make_vp_node(n.p, n.μ, l, r, false)), garbage, dist)
     end
     x = dist(n.p, q)
     if x < n.μ
@@ -195,8 +200,7 @@ function delete!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) 
     else
         r = delete!(r, q, garbage, dist)
     end
-    check_rebuild(VPNodePtr(VPNode(n.p, n.μ, stats(l, r, n.active), l, r, n.active)), garbage, dist)
-    #VPNodePtr(VPNode(n.p, n.μ, stats(l, r, n.active), l, r, n.active))
+    check_rebuild(VPNodePtr(make_vp_node(n.p, n.μ, l, r, n.active)), garbage, dist)
 end
 
 
@@ -283,16 +287,6 @@ function closest(tree::VPTree, q::Sample)
     (best_p, best_d)
 end
 
-function verify(t::VPTree)
-    eachnode(t) do node
-        if !isnull(t.left)
-            nothing
-        end
-        if !isnull(t.right)
-            nothing
-        end
-    end
-end
 
 end # module
 
