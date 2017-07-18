@@ -16,9 +16,6 @@ def build_plot(fname, ax):
     Y = f["Y"].value
     labels = f["labels"].value
 
-
-    #algo = "foo"
-    #infile = "bar"
     algo = f.attrs["algo"]
     infile = f.attrs["input"]
     N = Y.shape[0]
@@ -34,10 +31,9 @@ def build_plot(fname, ax):
     plt.axis('tight')
 
 
-def show_plots(fnames):
+def show_plots(fnames, cols=3):
 
     N = len(fnames)
-    cols = 2
     rows = (N + cols - 1) // cols
 
     fig = plt.figure(figsize=(10, 10))
