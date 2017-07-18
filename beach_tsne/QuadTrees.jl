@@ -4,9 +4,9 @@ using StaticArrays
 
 const Point = SVector{2, Float64}
 
-import Base: insert!, count
+import Base: count, insert!, delete!
 
-export QuadTree, make_quad_tree, Point, count, center, insert!
+export QuadTree, make_quad_tree, Point, count, center, insert!, delete!, value
 
 immutable QTNode
     p1::Point
@@ -48,6 +48,12 @@ function compose_node(p1::Point, p2::Point, ul::QTNodePtr, ur::QTNodePtr, ll::QT
 
     # compute center of mass from children and build node
     total = count(ul) + count(ur) + count(ll) + count(lr)
+
+    if total == 1
+        child = get(!isnull(ul) ? ul : !isnull(ur) ? ur : !isnull(ll) ? ll : lr)
+        return make_node(p1, p2, child.id, child.value)
+    end
+
     wul = count(ul) / total
     wur = count(ur) / total
     wll = count(ll) / total
@@ -118,13 +124,45 @@ function insert(node::QTNode, id::Int, value::Point)
 
 end
 
+function delete(node::QTNodePtr, id::Int, value::Point)
+    isnull(node) && error("not found")
+    delete(get(node), id, value)
+end
 
 function delete(node::QTNode, id::Int, value::Point)
     p1 = node.p1
     p2 = node.p2
+
+    if node.id == id
+        @assert count(node) == 1
+        return QTNodePtr()
+    end
+
+    count(node) == 1 && error("not found")
+
+    isleft, islower = quadrant(node, value)
+
+    ul = node.ul
+    ur = node.ur
+    ll = node.ll
+    lr = node.lr
+
+    if isleft
+        if islower
+            ll = delete(ll, id, value)
+        else
+            ul = delete(ul, id, value)
+        end
+    else
+        if islower
+            lr = delete(lr, id, value)
+        else
+            ur = delete(ur, id, value)
+        end
+    end
+
+    compose_node(p1, p2, ul, ur, ll, lr)
 end
-
-
 
 type QuadTree
     p1::Point
@@ -144,9 +182,9 @@ function insert!(tree::QuadTree, id::Int, value::Point)
     end
 end
 
-
-
-
+function delete!(tree::QuadTree, id::Int, value::Point)
+    tree.root = delete(get(tree.root), id, value)
+end
 
 
 end # module
