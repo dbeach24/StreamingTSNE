@@ -1,0 +1,14 @@
+references:
+    - id: tsne
+      author:
+        - family: "van der Maaten"
+          given: Laurens
+        - family: Hinton
+          given: Geoffrey
+      title: Visualizing Data using t-SNE
+      issued:
+        year: 2008
+      type: article-journal
+      volume: 9
+      container-title: "Journal of Machine Learning Research"
+
