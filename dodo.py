@@ -11,6 +11,7 @@ MAX_PYTHON_N2_SIZE = 4000
 def mkdir(path):
     return {
         'name': "mkdir: %s" % path,
+        'file_dep': [path],
         'targets': [path],
         'actions': ["mkdir -p %s" % path],
     }
@@ -39,6 +40,19 @@ def build_tsne_julia_n2(n):
         'file_dep': ["bench/tsne_julia.jl", infile],
         'targets': [outfile],
         'actions': ["(cd bench; ./tsne_julia.jl ../%s ../%s)" % (infile, outfile)],
+        'clean': [clean_targets],
+    }
+
+
+def build_tsne_julia_mod(n):
+    infile = sample_file(n)
+    outfile = "outputs/julia_mod_mnist_%d.h5" % n
+
+    return {
+        'name': "MNIST (Julia Mod) N=%d" % n,
+        'file_dep': ["bench/tsne_julia_2.jl", infile],
+        'targets': [outfile],
+        'actions': ["(cd bench; ./tsne_julia_2.jl ../%s ../%s)" % (infile, outfile)],
         'clean': [clean_targets],
     }
 
@@ -83,7 +97,6 @@ def build_tsne_bhtsne(n):
     }
 
 
-
 def task_data():
 
     yield mkdir("samples")
@@ -95,6 +108,10 @@ def task_data():
     for n in SIZES:
         if n <= MAX_JULIA_N2_SIZE:
             yield build_tsne_julia_n2(n)
+
+    for n in SIZES:
+        if n <= MAX_JULIA_N2_SIZE:
+            yield build_tsne_julia_mod(n)
 
     for n in SIZES:
         if n <= MAX_SCIKIT_N2_SIZE:
