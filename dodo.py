@@ -11,7 +11,6 @@ MAX_PYTHON_N2_SIZE = 4000
 def mkdir(path):
     return {
         'name': "mkdir: %s" % path,
-        'file_dep': [path],
         'targets': [path],
         'actions': ["mkdir -p %s" % path],
     }
