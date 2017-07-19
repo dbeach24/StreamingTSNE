@@ -42,4 +42,5 @@ def task_data():
 
     yield make_pdf("Proposal.md", "pdf/Proposal.pdf")
     yield make_pdf("Progress1.md", "pdf/Progress1.pdf")
-    yield make_pdf("Critique.md", "pdf/Critique.pdf")
+    yield make_pdf("Critique.md", "pdf/Critique.pdf", toc=False)
+    yield make_pdf("Progress2.md", "pdf/Progress2.pdf")
