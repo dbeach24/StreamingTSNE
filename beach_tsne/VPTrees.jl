@@ -2,6 +2,8 @@ module VPTrees
 
 import Base: search, insert!, count, collect, delete!
 
+using DataStructures
+
 export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
@@ -257,7 +259,7 @@ function search(
         τ < 0 && return τ
     end
     if x + τ >= n.μ
-        # search rigth (outside)
+        # search right (outside)
         τ = search(f, n.right, q, τ, dist)
     end
     τ
@@ -284,6 +286,29 @@ function closest(tree::VPTree, q::Sample)
         best_d
     end
     (best_p, best_d)
+end
+
+function closest(tree::VPTree, q::Sample, k)
+    pq = PriorityQueue{Sample, Radius, Base.Order.ForwardOrdering}()
+    τ = Inf
+    search(tree, q, τ) do p, d
+        if p != q
+            enqueue!(pq, p, -d)
+            if length(pq) > k
+                dequeue!(pq)
+                τ = -(peek(pq)[:2])
+            end
+        end
+        τ
+    end
+    results = Vector{Tuple{Sample, Radius}}()
+    while !isempty(pq)
+        (p, nd) = peek(pq)
+        push!(results, (p, -nd))
+        dequeue!(pq)
+    end
+    reverse!(results)
+    results
 end
 
 
