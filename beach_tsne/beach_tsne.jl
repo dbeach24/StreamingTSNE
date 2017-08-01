@@ -1,6 +1,6 @@
 
 
-module OnlineTSNE
+#module OnlineTSNE
 
 using ProgressMeter
 using Distributions
@@ -11,6 +11,7 @@ using QuadTrees
 using SFML
 
 import Base: insert!, count
+import QuadTrees: QTNode, QTNodePtr
 
 const Vec = Vector{Float64}
 const Point = SVector{2, Float64}
@@ -18,31 +19,41 @@ const Sample = Int
 
 const InitDist = MultivariateNormal(zeros(2), eye(2) * 1e-4)
 
+immutable TSNENeighbor
+    dist::Float64
+    pij::Float64
+end
+
 type TSNEPoint
     id::Int
     x::Vec
     y::Point
-    priory::Point
+    Δy::Point
+    ∂y::Point
+    gain::Point
     iterctr::Int
     freshness::Float64 # ???
     β::Float64
     ΣP::Float64
+    neighbors::Dict{Int, TSNENeighbor}
 end
 
 
 type TSNEState
     niters::Int
     perplexity::Float64
+    θ::Float64
     dist::Function
     points::Dict{Int, TSNEPoint}
     vptree::VPTree
     quadtree::QuadTree
     nextid::Int
+    ΣPij::Float64
 end
 
 count(state::TSNEState) = count(state.vptree)
 
-function cached_distance(dist::Function, maxsize::Int=10000)
+function cached_distance(dist::Function, maxsize::Int=1000000)
 
     cache = Dict{Tuple{Int,Int}, Float64}()
 
@@ -63,30 +74,34 @@ end
 function make_tsne_point(id::Sample, value::Vec)
     pt = rand(InitDist)
     TSNEPoint(
-        id, value, pt, pt, 0, 0.0, -1.0, -1.0
+        id, value, pt, SVector(0.0, 0.0), SVector(0.0, 0.0), SVector(1.0, 1.0), 0, 0.0, -1.0, -1.0,
+        Dict{Int, TSNENeighbor}()
     )
 end
 
 
-function make_tsne_state(; niters=1000, perplexity=20.0)
+function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
 
     points = Dict{Int, TSNEPoint}()
 
     dist = cached_distance() do i,j
-        norm(points[i].x - points[j].x)
+        norm(points[i].x .- points[j].x)
     end
 
     vptree = make_vp_tree(dist)
-    quadtree = make_quad_tree(Point(-100.0, -100.0), Point(100.0, 100.0))
+    quadtree = make_quad_tree(Point(-1000.0, -1000.0), Point(1000.0, 1000.0))
     nextid = 1
+    ΣPij = 0.0
     state = TSNEState(
         niters,
         perplexity,
+        θ,
         dist,
         points,
         vptree,
         quadtree,
-        nextid
+        nextid,
+        ΣPij
     )
 
 end
@@ -96,30 +111,51 @@ function insert!(state::TSNEState, value::Vec)
     id = state.nextid
     state.nextid += 1
 
-    state.points[id] = point = make_tsne_point(id, value)
+    state.points[id] = pi = make_tsne_point(id, value)
     insert!(state.vptree, id)
-    insert!(state.quadtree, id, point.y)
+    insert!(state.quadtree, id, pi.y)
 end
 
 
 function updateβ!(state::TSNEState, i::Sample)
-    point = state.points[i]
-    β, ΣP = solveβ(state.vptree, i, state.perplexity; β0 = point.β)
-    point.β = β
-    point.ΣP = ΣP
+    pi = state.points[i]
+    β, ΣP, neighbor_dist = solveβ(state, i; β0 = pi.β)
+    pi.β = β
+    pi.ΣP = ΣP
+
+    updated = Set{Int}()
+
+    for (j, d) ∈ neighbor_dist
+        pj = state.points[j]
+        update_neighbor!(state, pi, pj, d)
+        push!(updated, j)
+    end
+
+    for (j, neighbor) ∈ pi.neighbors
+        if j ∉ updated
+            pj = state.points[j]
+            d = neighbor.dist
+            update_neighbor!(state, pi, pj, d)
+        end
+    end
+
     nothing
 end
 
 
-function solveβ(vptree::VPTree, i::Sample, perplexity::Number=30.0;
-    β0::Number=-1, max_iter::Int=50, tol::Number=0.03)
+function solveβ(state::TSNEState, i::Sample;
+                β0::Number=-1, max_iter::Int=50, tol::Number=1e-5)
 
     # NOTE: This loop solves for sigma (σ) in terms of beta (β)
     # where β = 1 / 2σ^2
     # σ = sqrt(1 / 2β)
 
+    u = state.perplexity
+
+    neighbor_dist = closest(state.vptree, i, floor(3u))
+
     if β0 < 0
-        (_, σ0) = closest(vptree, i)
+        (_, σ0) = neighbor_dist[1]
         β0 = 1 / (2σ0^2)
     end
 
@@ -128,34 +164,35 @@ function solveβ(vptree::VPTree, i::Sample, perplexity::Number=30.0;
     βmax = Inf
     ΣP = 0
 
-    logU = log(perplexity)
+    logU = log(u)
+    logUtol = logU * tol
 
-    # exclude i from distances
-    # update all other distances by subtracting minD
     # for each distance D[i,j], P[j|i] = exp(-β * D[i,j])
     # ΣP = sum(P)
     # H = -β + log(sumP) + β * sum(D[j] * P[j]) / sumP
 
+    pi = state.points[i]
     for iter ∈ 1:max_iter
 
         ΣP = 0.0
         DdotP = 0.0
-        σ = sqrt(1 / (2β))
-        τ = 3σ
-        search(vptree, i, τ) do j, d
+
+        for (j, d) in neighbor_dist
             if i != j
                 d2 = d^2
                 Pj = exp(-β * d2)
                 ΣP += Pj
                 DdotP += d2 * Pj
             end
-            # continue search with radius=τ
-            τ
         end
+
         # H is the perplexity of the gaussian on this iteration
         H = log(ΣP) + β * DdotP / ΣP
         Hdiff = H - logU
-        abs(Hdiff) < tol && break
+
+        #println("iter $iter, Hdiff=$Hdiff, β = $β, σ=$σ")
+
+        abs(Hdiff) < logUtol && break
 
         if Hdiff > 0.0
             βmin = β
@@ -167,87 +204,257 @@ function solveβ(vptree::VPTree, i::Sample, perplexity::Number=30.0;
 
     end
 
-    return β, ΣP
+    return β, ΣP, neighbor_dist
 end
 
-pj_given_i(state::TSNEState, j::TSNEPoint, i::TSNEPoint) = exp(-i.β * state.dist(i.id, j.id)^2) / i.ΣP
-pij(state::TSNEState, i::TSNEPoint, j::TSNEPoint) = (pj_given_i(state, j, i) + pj_given_i(state, i, j)) / 2*count(state)
-
-xydist2(x::Point, y::Point) = (x[:1] - y[:1])^2 + (x[:2] - y[:2])^2
-xydist2(x::TSNEPoint, y::TSNEPoint) = xydist2(x.y, y.y)
-
-function qij(i::TSNEPoint, j::TSNEPoint)
-    denom = sum(1/(1 + xydist2(k, l)) for k in all for l in all if k ≠ l)
-    (1 / (1 + xydist2(i, j))) / denom
-end
-
-function f_attr(state::TSNEState, i::Sample)
-    pointi = state.points[i]
-    β = pointi.β
-    σ = sqrt(1 / 2β)
-    τ = 3σ
-    fx = 0.0
-    fy = 0.0
-    search(state.vptree, i, τ) do j, dist
-        if j ≠ i
-            pointj = state.points[j]
-            fmag = pij(state, pointi, pointj) / (1 + xydist2(pointi, pointj))
-            fx += (pointi.y[:1] .- pointj.y[:1]) .* fmag
-            fy += (pointi.y[:2] .- pointj.y[:2]) .* fmag
-        end
-        τ
+function update_neighbor!(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint, dist::Float64)
+    d2 = dist^2
+    pj_i = exp(-pi.β * d2) / pi.ΣP
+    pi_j = exp(-pj.β * d2) / pj.ΣP
+    pij = (pj_i + pi_j) / 2
+    if pij < 1e-3
+        pij = 0.0
     end
-    SVector(fx, fy)
+    old_pij = get(pi.neighbors, pj.id, TSNENeighbor(0.0, 0.0)).pij
+    pi.neighbors[pj.id] = TSNENeighbor(dist, pij)
+    pj.neighbors[pi.id] = TSNENeighbor(dist, pij)
+    state.ΣPij += 2(pij - old_pij)
+    nothing
 end
 
-function f_rep(state::TSNEState, i::Sample)
-    pointi = state.points[i]
-    fx = 0.0
-    fy = 0.0
 
+# function get_pij(state::TSNEState, i::Int, j::Int)
+#     i > j && ((i,j) = (j,i))
+#     get(state.pij, (i, j), 0.0)
+# end
 
-    SVector(fx, fy)
+# function update_pij!(state::TSNEState, i::Int, j::Int)
+#     i == j && return nothing
+#     i > j && ((i,j) = (j,i))    
+#     pi = state.points[i]
+#     pj = state.points[j]
+#     state.pij[i,j] = pij(state, pi, pj)
+#     nothing
+# end
+
+pj_given_i(state::TSNEState, pj::TSNEPoint, pi::TSNEPoint) = exp(-pi.β * state.dist(pi.id, pj.id)^2) / pi.ΣP
+pij(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint) = ((
+        pj_given_i(state, pj, pi) + pj_given_i(state, pi, pj)
+    ) / 2*count(state)) / count(state)^2
+
+qijZ(pi::TSNEPoint, pj::TSNEPoint) = qijZ(pi.y, pj.y)
+qijZ(yi::Point, yj::Point) = 1 / (1 + xydist2(yi, yj))
+
+xydist2(yi::Point, yj::Point) = (yi[:1] - yj[:1])^2 + (yi[:2] - yj[:2])^2
+xydist2(pi::TSNEPoint, pj::TSNEPoint) = xydist2(pi.y, pj.y)
+
+"""Attractive Force (N^2)"""
+function f_attr_n2(state::TSNEState, i::Sample)
+    pi = state.points[i]
+    f = SVector(0.0, 0.0)
+    for pj ∈ values(state.points)
+        pi.id == pj.id && continue
+        fmag = pij(state, pi, pj) * qijZ(pi, pj)
+        @assert fmag ≥ 0
+        f += (pi.y - pj.y) * fmag
+    end
+    f
 end
 
-gradient(state::TSNEState, i::Sample) = 4 * (f_attr(state, i) - f_rep(state, i))
+
+"""Attractive Force (Barnes-Hut)"""
+function f_attr_bh(state::TSNEState, i::Sample)
+    pi = state.points[i]
+    f = SVector(0.0, 0.0)
+    neighbors = pi.neighbors
+    for (j, neighbor) in neighbors
+        pj = state.points[j]
+        pij = neighbor.pij
+        fmag = pij * qijZ(pi, pj)
+        @assert fmag ≥ 0
+        f += (pi.y - pj.y) * fmag
+    end
+    f / state.ΣPij
+end
+
+"""Z-term (N^2)"""
+function Zterm_n2(state::TSNEState)
+    points = values(state.points)
+    sum(qijZ(k, l) for k ∈ points, l ∈ points if k.id ≠ l.id)
+end
+
+"""Z-term (Barnes-Hut)"""
+function Zterm_bh(state::TSNEState)
+    root = state.quadtree.root
+    sum(Zterm_bh(state, pi, root) for pi in values(state.points))
+end
+
+Zterm_bh(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? 0.0 : Zterm_bh(state, pi, get(n))
+
+function Zterm_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
+    c = count(node)
+    yi = pi.y
+    yj = value(node)
+
+    if node.id == pi.id
+        0.0
+    elseif count(node) == 1 || bh_eligible(state, pi, node)
+        c * qijZ(yi, yj)
+    else
+        (
+            Zterm_bh(state, pi, node.ul) +
+            Zterm_bh(state, pi, node.ur) +
+            Zterm_bh(state, pi, node.ll) +
+            Zterm_bh(state, pi, node.lr)
+        )
+    end
+end
+
+"""Repulsive Force (N^2)"""
+function f_rep_n2(state::TSNEState, i::Sample, Z::Float64)
+    f = SVector(0.0, 0.0)
+    pi = state.points[i]
+    yi = pi.y
+    for pj in values(state.points)
+        pi == pj && continue
+        yj = pj.y
+        qZ = qijZ(yi, yj)
+        @assert qZ ≥ 0
+        q2Z2 = qZ^2
+        f += q2Z2 * (yi - yj)
+    end
+    f / Z
+end
+
+"""Repulsive Force (Barnes-Hut)"""
+function f_rep_bh(state::TSNEState, i::Sample, Z::Float64) 
+    f = f_rep_bh(state, state.points[i], state.quadtree.root)
+    f / Z
+end
+
+f_rep_bh(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? SVector(0.0, 0.0) : f_rep_bh(state, pi, get(n))
+
+function f_rep_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
+    c = count(node)
+    yi = pi.y
+    yj = value(node)
+
+    if node.id == pi.id
+        SVector(0.0, 0.0)
+    elseif c == 1 || bh_eligible(state, pi, node)
+        # use center of mass
+        qZ = qijZ(yi, yj)
+        q2Z2 = qZ^2
+        @assert q2Z2 ≥ 0
+        c * q2Z2 * (yi - yj)
+    else
+        (
+            f_rep_bh(state, pi, node.ul) +
+            f_rep_bh(state, pi, node.ur) +
+            f_rep_bh(state, pi, node.ll) +
+            f_rep_bh(state, pi, node.lr)
+        )
+    end
+end
+
+function bh_eligible(state::TSNEState, point::TSNEPoint, node::QTNode)
+    yi = point.y
+    yj = value(node)
+    r_cell = sqrt(xydist2(node.p1, node.p2))
+    #y_cell = xydist2(yi, yj)
+    # TODO SEEMS WRONG
+    # Think it should be:
+    y_cell = sqrt(xydist2(yi, yj))
+
+    (r_cell / y_cell) < state.θ
+end
+
+
+objective(state::TSNEState) = objective(state, Zterm(state))
+
+function objective(state::TSNEState, Z)
+    ΣPij = state.ΣPij
+    kl = 0.0
+    for (i, pᵢ) ∈ state.points
+        for (j, neighbor) ∈ pᵢ.neighbors
+            pⱼ = state.points[j]
+            pᵢⱼ = neighbor.pij / ΣPij
+            if pᵢⱼ > 0.0
+                qᵢⱼ = qijZ(pᵢ, pⱼ) / Z
+                kl += pᵢⱼ * log(pᵢⱼ / qᵢⱼ)
+            end
+        end
+    end
+    kl
+end
+
+"""Gradient (N^2)"""
+function gradient_n2(state::TSNEState, i::Sample, Z, exaggeration)
+    #@show f_attr_n2(state, i) - f_attr_bh(state, i)
+    #@show f_rep_n2(state, i, Z) - f_rep_bh(state, i, Z)
+
+    fₐ = f_attr_n2(state, i) * exaggeration
+    fᵣ = f_rep_n2(state, i, Z)
+    4 * (fₐ - fᵣ)
+end
+
+"""Gradient (Barnes-Hut)"""
+function gradient_bh(state::TSNEState, i::Sample, Z, exaggeration)
+    fₐ = f_attr_bh(state, i) * exaggeration
+    fᵣ = f_rep_bh(state, i, Z)
+    4 * (fₐ - fᵣ)
+end
 
 update!(state::TSNEState) = update!(state, keys(state.points))
 
 function update!(state::TSNEState, indices)
 
+    Z = Zterm_bh(state)
+    #println("Z = $Z")
+
     # compute the gradients
-    grad = Dict{Int, Point}()
     for i in indices
-        grad[i] = gradient(state, i)
+        pi = state.points[i]
+        exaggeration = max(1.0, 4.0 - pi.iterctr * .01)
+        #exaggeration = ifelse(pi.iterctr < 100, 4.0, 1.0)
+        pi.∂y = gradient_bh(state, i, Z, exaggeration)
     end
+
+    η = 500.0 # learning rate
 
     # update point states
     for i in indices
-        point = state.points[i]
-        η = -1e-3
-        α = ifelse(point.iterctr < 250, 0.5, 0.8)
+        pi = state.points[i]
+        α = ifelse(pi.iterctr < 20, 0.5, 0.8)
 
-        ∂y = grad[i]
+        # update gain
+        g1 = update_gain(pi.gain[:1], pi.∂y[:1], pi.Δy[:1])
+        g2 = update_gain(pi.gain[:2], pi.∂y[:2], pi.Δy[:2])
+        pi.gain = Point(g1, g2)
 
-        # compute updated points
-        y_tm2 = point.priory
-        y_tm1 = point.y
-        y_t = y_tm1 .+ η .* ∂y .+ α .* (y_tm1 .- y_tm2)
+        # compute updated velocity
+        pi.Δy = α * pi.Δy - η * (pi.gain .* pi.∂y)
 
         # update point's state
-        point.y = y_t
-        point.priory = y_tm1
-        point.iterctr += 1
+        delete!(state.quadtree, i, pi.y)
+        pi.y += pi.Δy
+        pi.iterctr += 1
+        insert!(state.quadtree, i, pi.y)
+
     end
+
+    println("kl = $(objective(state, Z))")
+
     nothing
 end
 
-function main(infile)
-    X = map(Float64, h5read(infile, "X"))
+update_gain(gain, dy, iy) = max(0.01, sign(dy) != sign(iy) ? gain + 0.2 : gain * 0.8)
+
+function load_tsne(X)
 
     D, N = size(X)
 
-    state = make_tsne_state()
+    state = make_tsne_state(perplexity=20.)
 
     for i ∈ 1:N
         vec = X[:,i]
@@ -259,31 +466,47 @@ function main(infile)
         updateβ!(state, i)
     end
 
+    #psum = sum(pij(state, pi, pj) for pi in values(state.points), pj in values(state.points) if pi.id ≠ pj.id)
+    #@show ps = psum(state)
+    #@assert abs(psum - 1.0) < 0.1
+
+    state
+end    
+
+
+function mainloop(state, labels, iters=1000)
     window = mkwindow()
 
-    for t ∈ 1:1000
+    for t ∈ 1:iters
         println("update #$t")
         update!(state)
-        # for i ∈ 1:N
-        #     update!(state, i)
-        # end
-
-        view(window, state) || break
-
+        view(window, state, labels) || break
     end
-
 end
 
-const window_width = 1000
-const window_height = 1000
+const window_width = 2000
+const window_height = 2000
 const hwidth = window_width / 2
 const hheight = window_height / 2
+const colors = [
+    SFML.Color(141,211,199),
+    SFML.Color(255,255,179),
+    SFML.Color(190,186,218),
+    SFML.Color(251,128,114),
+    SFML.Color(128,177,211),
+    SFML.Color(253,180,98),
+    SFML.Color(179,222,105),
+    SFML.Color(252,205,229),
+    SFML.Color(217,217,217),
+    SFML.Color(188,128,189),
+]
+const viewscale = 100
 
-function mkdot(x, y; r=2, color=SFML.red)
+function mkdot(x, y; r=8, label=1)
     dot = CircleShape()
     set_position(dot, Vector2f(x, y))
     set_radius(dot, r)
-    set_fillcolor(dot, color)
+    set_fillcolor(dot, colors[label])
     set_origin(dot, Vector2f(r, r))
     dot
 end
@@ -297,12 +520,12 @@ end
 
 function vec2screen(vec::Point)
     x, y = vec
-    sx = (x * hwidth) + hwidth
-    sy = (y * hheight) + hheight
+    sx = (x * hwidth / viewscale) + hwidth
+    sy = (y * hheight / viewscale) + hheight
     Point(sx, sy)
 end
 
-function view(window, state)
+function view(window, state, labels)
 
     event = Event()
 
@@ -317,7 +540,7 @@ function view(window, state)
 
     for point in values(state.points)
         xy = vec2screen(point.y)
-        dot = mkdot(xy[:1], xy[:2])
+        dot = mkdot(xy[:1], xy[:2]; r=8, label=labels[point.id]+1)
         draw(window, dot)
     end
 
@@ -326,9 +549,28 @@ function view(window, state)
 
 end
 
-main("../samples/mnist_250.h5")
+function main(fname)
+    X = map(Float64, h5read(fname, "X"))
+    labels = h5read(fname, "labels")
 
-end # module
+    # normalize pixel values to 0..1
+    X ./= 255.0
+
+    # Z-score normalization seems like a bad idea for this data!
+    # for d in 1:size(X,1)
+    #     sd = std(X[d,:])
+    #     if sd > 0
+    #         X[d,:] ./= sd
+    #     end
+    # end
+    state = load_tsne(X)
+    mainloop(state, labels)
+    state
+end
+
+state = main("../samples/mnist_1000.h5")
+
+#end # module
 
 
 
