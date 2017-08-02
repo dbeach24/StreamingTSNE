@@ -181,7 +181,7 @@ function solveβ(state::TSNEState, i::Sample;
         ΣP = 0.0
         DdotP = 0.0
         σ = sqrt(1 / 2β)
-        τ = 4σ
+        τ = 3σ
 
         for (n, (j, d)) in enumerate(neighbor_dist)
             if d > τ
@@ -413,6 +413,17 @@ function update!(state::TSNEState, indices)
         pi.∂y = gradient_bh(state, i, Z, exaggeration)
     end
 
+    # if more than 1/3 of points are updated,
+    # just rebuild the quadtree
+    if 3*length(indices) > count(state)
+        newtree = make_quad_tree(Point(-1000.0, -1000.0), Point(1000.0, 1000.0))
+        remove_points = false
+    else
+        # otherwise, update quadtree in-place
+        newtree = state.QuadTree
+        remove_points = true
+    end
+
     η = 500.0 # learning rate
 
     # update point states
@@ -429,12 +440,14 @@ function update!(state::TSNEState, indices)
         pi.Δy = α * pi.Δy - η * (pi.gain .* pi.∂y)
 
         # update point's state
-        delete!(state.quadtree, i, pi.y)
+        remove_points && delete!(state.quadtree, i, pi.y)
         pi.y += pi.Δy
         pi.iterctr += 1
-        insert!(state.quadtree, i, pi.y)
+        insert!(newtree, i, pi.y)
 
     end
+
+    state.quadtree = newtree
 
     nothing
 end
@@ -445,7 +458,7 @@ function load_tsne(X)
 
     D, N = size(X)
 
-    state = make_tsne_state(perplexity=8., θ=0.8)
+    state = make_tsne_state(perplexity=20., θ=0.8)
 
     for i ∈ 1:N
         vec = X[:,i]
