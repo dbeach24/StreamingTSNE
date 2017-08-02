@@ -29,7 +29,9 @@ type TSNEPoint
     x::Vec
     y::Point
     Δy::Point
-    ∂y::Point
+    fa::Point
+    fr::Point
+    zterm::Float64
     gain::Point
     iterctr::Int
     freshness::Float64 # ???
@@ -49,6 +51,7 @@ type TSNEState
     quadtree::QuadTree
     nextid::Int
     ΣPij::Float64
+    Z::Float64
 end
 
 count(state::TSNEState) = count(state.vptree)
@@ -74,8 +77,19 @@ end
 function make_tsne_point(id::Sample, value::Vec)
     pt = rand(InitDist)
     TSNEPoint(
-        id, value, pt, SVector(0.0, 0.0), SVector(0.0, 0.0), SVector(1.0, 1.0), 0, 0.0, -1.0, -1.0,
-        Dict{Int, TSNENeighbor}()
+        id,                         # id
+        value,                      # x
+        pt,                         # y
+        SVector(0.0, 0.0),          # Δy
+        SVector(0.0, 0.0),          # fa
+        SVector(0.0, 0.0),          # fr
+        0.0,                        # zterm
+        SVector(1.0, 1.0),          # gain
+        0,                          # iterctr
+        0.0,                        # freshness
+        -1.0,                       # β
+        -1.0,                       # ΣP
+        Dict{Int, TSNENeighbor}()   # neighbors
     )
 end
 
@@ -88,10 +102,13 @@ function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
         norm(points[i].x .- points[j].x)
     end
 
+    #dist(i,j) = norm(points[i].x .- points[j].x)
+
     vptree = make_vp_tree(dist)
     quadtree = make_quad_tree(Point(-1000.0, -1000.0), Point(1000.0, 1000.0))
     nextid = 1
     ΣPij = 0.0
+    Z = 0.0
     state = TSNEState(
         niters,
         perplexity,
@@ -101,7 +118,8 @@ function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
         vptree,
         quadtree,
         nextid,
-        ΣPij
+        ΣPij,
+        Z,
     )
 
 end
@@ -230,13 +248,8 @@ function update_neighbor!(pi::TSNEPoint, pj::TSNEPoint, dist::Float64)
     delta_pij
 end
 
-pj_given_i(state::TSNEState, pj::TSNEPoint, pi::TSNEPoint) = exp(-pi.β * state.dist(pi.id, pj.id)^2) / pi.ΣP
-pij(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint) = ((
-        pj_given_i(state, pj, pi) + pj_given_i(state, pi, pj)
-    ) / 2*count(state)) / count(state)^2
-
-qijZ(pi::TSNEPoint, pj::TSNEPoint) = qijZ(pi.y, pj.y)
-qijZ(yi::Point, yj::Point) = 1 / (1 + xydist2(yi, yj))
+qij(pi::TSNEPoint, pj::TSNEPoint) = qij(pi.y, pj.y)
+qij(yi::Point, yj::Point) = 1 / (1 + xydist2(yi, yj))
 
 xydist2(yi::Point, yj::Point) = (yi[:1] - yj[:1])^2 + (yi[:2] - yj[:2])^2
 xydist2(pi::TSNEPoint, pj::TSNEPoint) = xydist2(pi.y, pj.y)
@@ -248,48 +261,18 @@ function f_attr(state::TSNEState, i::Sample)
     neighbors = pi.neighbors
     for (j, neighbor) in neighbors
         pj = state.points[j]
-        pij = neighbor.pij
-        fmag = pij * qijZ(pi, pj)
+        pᵢⱼ = neighbor.pij
+        qᵢⱼ = qij(pi, pj)
+        fmag = pᵢⱼ * qᵢⱼ
         @assert fmag ≥ 0
         f += (pi.y - pj.y) * fmag
     end
     f / state.ΣPij
 end
 
-"""Z-term (Barnes-Hut)"""
-function Zterm(state::TSNEState)
-    root = state.quadtree.root
-    sum(Zterm(state, pi, root) for pi in values(state.points))
-end
-
-Zterm(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? 0.0 : Zterm(state, pi, get(n))
-
-function Zterm(state::TSNEState, pi::TSNEPoint, node::QTNode)
-    c = count(node)
-    yi = pi.y
-    yj = value(node)
-
-    if node.id == pi.id
-        0.0
-    elseif count(node) == 1 || bh_eligible(state, pi, node)
-        c * qijZ(yi, yj)
-    else
-        (
-            Zterm(state, pi, node.ul) +
-            Zterm(state, pi, node.ur) +
-            Zterm(state, pi, node.ll) +
-            Zterm(state, pi, node.lr)
-        )
-    end
-end
-
 """Repulsive Force (Barnes-Hut)"""
-function f_rep(state::TSNEState, i::Sample, Z::Float64) 
-    f = f_rep(state, state.points[i], state.quadtree.root)
-    f / Z
-end
-
-f_rep(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? SVector(0.0, 0.0) : f_rep(state, pi, get(n))
+f_rep(state::TSNEState, i::Sample) = f_rep(state, state.points[i], state.quadtree.root)
+f_rep(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? (0.0, SVector(0.0, 0.0)) : f_rep(state, pi, get(n))
 
 function f_rep(state::TSNEState, pi::TSNEPoint, node::QTNode)
     c = count(node)
@@ -297,47 +280,41 @@ function f_rep(state::TSNEState, pi::TSNEPoint, node::QTNode)
     yj = value(node)
 
     if node.id == pi.id
-        SVector(0.0, 0.0)
+        zterm = 0.0
+        f = SVector(0.0, 0.0)
     elseif c == 1 || bh_eligible(state, pi, node)
         # use center of mass
-        qZ = qijZ(yi, yj)
-        q2Z2 = qZ^2
-        @assert q2Z2 ≥ 0
-        c * q2Z2 * (yi - yj)
+        qᵢⱼ = qij(yi, yj)
+        zterm = c * qᵢⱼ
+        f = zterm * qᵢⱼ * (yi - yj)
     else
-        (
-            f_rep(state, pi, node.ul) +
-            f_rep(state, pi, node.ur) +
-            f_rep(state, pi, node.ll) +
-            f_rep(state, pi, node.lr)
-        )
+        z1, f1 = f_rep(state, pi, node.ul)
+        z2, f2 = f_rep(state, pi, node.ur)
+        z3, f3 = f_rep(state, pi, node.ll)
+        z4, f4 = f_rep(state, pi, node.lr)
+        zterm = z1 + z2 + z3 + z4
+        f = f1 + f2 + f3 + f4
     end
+    (zterm, f)
 end
 
-function bh_eligible(state::TSNEState, point::TSNEPoint, node::QTNode)
-    yi = point.y
-    yj = value(node)
-    r_cell = sqrt(xydist2(node.p1, node.p2))
-    #y_cell = xydist2(yi, yj)
-    # TODO SEEMS WRONG
-    # Think it should be:
-    y_cell = sqrt(xydist2(yi, yj))
-
-    (r_cell / y_cell) < state.θ
+function bh_eligible(state::TSNEState, pi::TSNEPoint, node::QTNode)
+    r2_cell = xydist2(node.p1, node.p2)
+    y2_cell = xydist2(pi.y, value(node))
+    (r2_cell / y2_cell) < state.θ^2
 end
 
 
-objective(state::TSNEState) = objective(state, Zterm(state))
-
-function objective(state::TSNEState, Z)
+function objective(state::TSNEState)
     ΣPij = state.ΣPij
+    Z = state.Z
     kl = 0.0
-    for (i, pᵢ) ∈ state.points
-        for (j, neighbor) ∈ pᵢ.neighbors
-            pⱼ = state.points[j]
+    for (i, pi) ∈ state.points
+        for (j, neighbor) ∈ pi.neighbors
+            pj = state.points[j]
             pᵢⱼ = neighbor.pij / ΣPij
             if pᵢⱼ > 0.0
-                qᵢⱼ = qijZ(pᵢ, pⱼ) / Z
+                qᵢⱼ = qij(pi, pj) / Z
                 kl += pᵢⱼ * log(pᵢⱼ / qᵢⱼ)
             end
         end
@@ -346,9 +323,9 @@ function objective(state::TSNEState, Z)
 end
 
 """Gradient (Barnes-Hut)"""
-function gradient(state::TSNEState, i::Sample, Z, exaggeration)
+function gradient(state::TSNEState, i::Sample, exaggeration)
     fₐ = f_attr(state, i) * exaggeration
-    fᵣ = f_rep(state, i, Z)
+    Z, fᵣ = f_rep(state, i, Z)
     4 * (fₐ - fᵣ)
 end
 
@@ -356,21 +333,25 @@ update!(state::TSNEState) = update!(state, keys(state.points))
 
 function update!(state::TSNEState, indices)
 
-    Z = Zterm(state)
-    #println("Z = $Z")
-
-    # compute the gradients
+    # update the forces
+    ΔZ = 0.0
     for i in indices
         pi = state.points[i]
-        exaggeration = max(1.0, 4.0 - pi.iterctr * .01)
-        #exaggeration = ifelse(pi.iterctr < 100, 4.0, 1.0)
-        pi.∂y = gradient(state, i, Z, exaggeration)
+        oldzterm = pi.zterm
+        pi.fa = f_attr(state, i)
+        (zterm, fr) = f_rep(state, i)
+        pi.fr = fr
+        pi.zterm = zterm
+        ΔZ += zterm - oldzterm
     end
+    state.Z += ΔZ
+    Z = state.Z
 
     # if more than 1/3 of points are updated,
     # just rebuild the quadtree
     if 3*length(indices) > count(state)
-        newtree = make_quad_tree(Point(-1000.0, -1000.0), Point(1000.0, 1000.0))
+        r = 1000.0
+        newtree = make_quad_tree(Point(-r, -r), Point(r, r))
         remove_points = false
     else
         # otherwise, update quadtree in-place
@@ -383,15 +364,21 @@ function update!(state::TSNEState, indices)
     # update point states
     for i in indices
         pi = state.points[i]
-        α = ifelse(pi.iterctr < 20, 0.5, 0.8)
+        α = ifelse(pi.iterctr < 50, 0.5, 0.8)
+
+        exaggeration = max(1.0, 4.0 - pi.iterctr * .01)
+        #exaggeration = ifelse(pi.iterctr < 100, 4.0, 1.0)
+
+        # compute gradient
+        ∂y = 4 * (pi.fa * exaggeration - pi.fr / Z)
 
         # update gain
-        g1 = update_gain(pi.gain[:1], pi.∂y[:1], pi.Δy[:1])
-        g2 = update_gain(pi.gain[:2], pi.∂y[:2], pi.Δy[:2])
+        g1 = update_gain(pi.gain[:1], ∂y[:1], pi.Δy[:1])
+        g2 = update_gain(pi.gain[:2], ∂y[:2], pi.Δy[:2])
         pi.gain = Point(g1, g2)
 
         # compute updated velocity
-        pi.Δy = α * pi.Δy - η * (pi.gain .* pi.∂y)
+        pi.Δy = α * pi.Δy - η * (pi.gain .* ∂y)
 
         # update point's state
         remove_points && delete!(state.quadtree, i, pi.y)
@@ -419,14 +406,14 @@ function load_tsne(X)
         insert!(state, X[:,i])
     end
 
+    #Threads.@threads
     for i ∈ 1:N
-        println("updating β for point $i")
+        if mod(i, 10) == 0
+            println("updating neighborhood around point $i")
+        end
         update_neighborhood!(state, i)
+        #solve_neighborhood(state, i)
     end
-
-    #psum = sum(pij(state, pi, pj) for pi in values(state.points), pj in values(state.points) if pi.id ≠ pj.id)
-    #@show ps = psum(state)
-    #@assert abs(psum - 1.0) < 0.1
 
     state
 end    
@@ -436,7 +423,9 @@ function mainloop(state, labels, iters=1000)
     window = mkwindow()
 
     for t ∈ 1:iters
-        println("update #$t")
+        if mod(t, 10) == 0
+            println("update #$t   kl=$(objective(state))")
+        end
         update!(state)
         view(window, state, labels) || break
     end
