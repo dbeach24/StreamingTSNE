@@ -117,7 +117,7 @@ function insert!(state::TSNEState, value::Vec)
 end
 
 
-function updateβ!(state::TSNEState, i::Sample)
+function update_neighborhood!(state::TSNEState, i::Sample)
     pi = state.points[i]
     β, ΣP, neighbor_dist = solveβ(state, i; β0 = pi.β)
     pi.β = β
@@ -125,9 +125,11 @@ function updateβ!(state::TSNEState, i::Sample)
 
     updated = Set{Int}()
 
+    ΔΣPij = 0.0
+
     for (j, d) ∈ neighbor_dist
         pj = state.points[j]
-        update_neighbor!(state, pi, pj, d)
+        ΔΣPij += update_neighbor!(pi, pj, d)
         push!(updated, j)
     end
 
@@ -135,10 +137,11 @@ function updateβ!(state::TSNEState, i::Sample)
         if j ∉ updated
             pj = state.points[j]
             d = neighbor.dist
-            update_neighbor!(state, pi, pj, d)
+            ΔΣPij += update_neighbor!(pi, pj, d)
         end
     end
 
+    state.ΣPij += ΔΣPij
     nothing
 end
 
@@ -163,6 +166,7 @@ function solveβ(state::TSNEState, i::Sample;
     βmin = 0.0
     βmax = Inf
     ΣP = 0
+    lastn = 1
 
     logU = log(u)
     logUtol = logU * tol
@@ -176,14 +180,18 @@ function solveβ(state::TSNEState, i::Sample;
 
         ΣP = 0.0
         DdotP = 0.0
+        σ = sqrt(1 / 2β)
+        τ = 4σ
 
-        for (j, d) in neighbor_dist
-            if i != j
-                d2 = d^2
-                Pj = exp(-β * d2)
-                ΣP += Pj
-                DdotP += d2 * Pj
+        for (n, (j, d)) in enumerate(neighbor_dist)
+            if d > τ
+                lastn = n - 1
+                break
             end
+            d2 = d^2
+            Pj = exp(-β * d2)
+            ΣP += Pj
+            DdotP += d2 * Pj
         end
 
         # H is the perplexity of the gaussian on this iteration
@@ -204,10 +212,10 @@ function solveβ(state::TSNEState, i::Sample;
 
     end
 
-    return β, ΣP, neighbor_dist
+    return β, ΣP, neighbor_dist[1:lastn]
 end
 
-function update_neighbor!(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint, dist::Float64)
+function update_neighbor!(pi::TSNEPoint, pj::TSNEPoint, dist::Float64)
     d2 = dist^2
     pj_i = exp(-pi.β * d2) / pi.ΣP
     pi_j = exp(-pj.β * d2) / pj.ΣP
@@ -218,24 +226,9 @@ function update_neighbor!(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint, dist::
     old_pij = get(pi.neighbors, pj.id, TSNENeighbor(0.0, 0.0)).pij
     pi.neighbors[pj.id] = TSNENeighbor(dist, pij)
     pj.neighbors[pi.id] = TSNENeighbor(dist, pij)
-    state.ΣPij += 2(pij - old_pij)
-    nothing
+    delta_pij = 2(pij - old_pij)
+    delta_pij
 end
-
-
-# function get_pij(state::TSNEState, i::Int, j::Int)
-#     i > j && ((i,j) = (j,i))
-#     get(state.pij, (i, j), 0.0)
-# end
-
-# function update_pij!(state::TSNEState, i::Int, j::Int)
-#     i == j && return nothing
-#     i > j && ((i,j) = (j,i))    
-#     pi = state.points[i]
-#     pj = state.points[j]
-#     state.pij[i,j] = pij(state, pi, pj)
-#     nothing
-# end
 
 pj_given_i(state::TSNEState, pj::TSNEPoint, pi::TSNEPoint) = exp(-pi.β * state.dist(pi.id, pj.id)^2) / pi.ΣP
 pij(state::TSNEState, pi::TSNEPoint, pj::TSNEPoint) = ((
@@ -443,8 +436,6 @@ function update!(state::TSNEState, indices)
 
     end
 
-    println("kl = $(objective(state, Z))")
-
     nothing
 end
 
@@ -454,7 +445,7 @@ function load_tsne(X)
 
     D, N = size(X)
 
-    state = make_tsne_state(perplexity=20.)
+    state = make_tsne_state(perplexity=8., θ=0.8)
 
     for i ∈ 1:N
         vec = X[:,i]
@@ -463,7 +454,7 @@ function load_tsne(X)
 
     for i ∈ 1:N
         println("updating β for point $i")
-        updateβ!(state, i)
+        update_neighborhood!(state, i)
     end
 
     #psum = sum(pij(state, pi, pj) for pi in values(state.points), pj in values(state.points) if pi.id ≠ pj.id)
@@ -484,8 +475,8 @@ function mainloop(state, labels, iters=1000)
     end
 end
 
-const window_width = 2000
-const window_height = 2000
+const window_width = 1500
+const window_height = 1500
 const hwidth = window_width / 2
 const hheight = window_height / 2
 const colors = [
@@ -568,7 +559,7 @@ function main(fname)
     state
 end
 
-state = main("../samples/mnist_1000.h5")
+state = main("../samples/mnist_2000.h5")
 
 #end # module
 
