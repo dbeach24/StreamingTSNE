@@ -119,7 +119,7 @@ end
 
 function update_neighborhood!(state::TSNEState, i::Sample)
     pi = state.points[i]
-    β, ΣP, neighbor_dist = solveβ(state, i; β0 = pi.β)
+    β, ΣP, neighbor_dist = solve_neighborhood(state, i; β0 = pi.β)
     pi.β = β
     pi.ΣP = ΣP
 
@@ -146,8 +146,8 @@ function update_neighborhood!(state::TSNEState, i::Sample)
 end
 
 
-function solveβ(state::TSNEState, i::Sample;
-                β0::Number=-1, max_iter::Int=50, tol::Number=1e-5)
+function solve_neighborhood(state::TSNEState, i::Sample;
+                            β0::Number=-1, max_iter::Int=50, tol::Number=1e-5)
 
     # NOTE: This loop solves for sigma (σ) in terms of beta (β)
     # where β = 1 / 2σ^2
@@ -241,22 +241,8 @@ qijZ(yi::Point, yj::Point) = 1 / (1 + xydist2(yi, yj))
 xydist2(yi::Point, yj::Point) = (yi[:1] - yj[:1])^2 + (yi[:2] - yj[:2])^2
 xydist2(pi::TSNEPoint, pj::TSNEPoint) = xydist2(pi.y, pj.y)
 
-"""Attractive Force (N^2)"""
-function f_attr_n2(state::TSNEState, i::Sample)
-    pi = state.points[i]
-    f = SVector(0.0, 0.0)
-    for pj ∈ values(state.points)
-        pi.id == pj.id && continue
-        fmag = pij(state, pi, pj) * qijZ(pi, pj)
-        @assert fmag ≥ 0
-        f += (pi.y - pj.y) * fmag
-    end
-    f
-end
-
-
 """Attractive Force (Barnes-Hut)"""
-function f_attr_bh(state::TSNEState, i::Sample)
+function f_attr(state::TSNEState, i::Sample)
     pi = state.points[i]
     f = SVector(0.0, 0.0)
     neighbors = pi.neighbors
@@ -270,21 +256,15 @@ function f_attr_bh(state::TSNEState, i::Sample)
     f / state.ΣPij
 end
 
-"""Z-term (N^2)"""
-function Zterm_n2(state::TSNEState)
-    points = values(state.points)
-    sum(qijZ(k, l) for k ∈ points, l ∈ points if k.id ≠ l.id)
-end
-
 """Z-term (Barnes-Hut)"""
-function Zterm_bh(state::TSNEState)
+function Zterm(state::TSNEState)
     root = state.quadtree.root
-    sum(Zterm_bh(state, pi, root) for pi in values(state.points))
+    sum(Zterm(state, pi, root) for pi in values(state.points))
 end
 
-Zterm_bh(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? 0.0 : Zterm_bh(state, pi, get(n))
+Zterm(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? 0.0 : Zterm(state, pi, get(n))
 
-function Zterm_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
+function Zterm(state::TSNEState, pi::TSNEPoint, node::QTNode)
     c = count(node)
     yi = pi.y
     yj = value(node)
@@ -295,39 +275,23 @@ function Zterm_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
         c * qijZ(yi, yj)
     else
         (
-            Zterm_bh(state, pi, node.ul) +
-            Zterm_bh(state, pi, node.ur) +
-            Zterm_bh(state, pi, node.ll) +
-            Zterm_bh(state, pi, node.lr)
+            Zterm(state, pi, node.ul) +
+            Zterm(state, pi, node.ur) +
+            Zterm(state, pi, node.ll) +
+            Zterm(state, pi, node.lr)
         )
     end
 end
 
-"""Repulsive Force (N^2)"""
-function f_rep_n2(state::TSNEState, i::Sample, Z::Float64)
-    f = SVector(0.0, 0.0)
-    pi = state.points[i]
-    yi = pi.y
-    for pj in values(state.points)
-        pi == pj && continue
-        yj = pj.y
-        qZ = qijZ(yi, yj)
-        @assert qZ ≥ 0
-        q2Z2 = qZ^2
-        f += q2Z2 * (yi - yj)
-    end
-    f / Z
-end
-
 """Repulsive Force (Barnes-Hut)"""
-function f_rep_bh(state::TSNEState, i::Sample, Z::Float64) 
-    f = f_rep_bh(state, state.points[i], state.quadtree.root)
+function f_rep(state::TSNEState, i::Sample, Z::Float64) 
+    f = f_rep(state, state.points[i], state.quadtree.root)
     f / Z
 end
 
-f_rep_bh(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? SVector(0.0, 0.0) : f_rep_bh(state, pi, get(n))
+f_rep(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? SVector(0.0, 0.0) : f_rep(state, pi, get(n))
 
-function f_rep_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
+function f_rep(state::TSNEState, pi::TSNEPoint, node::QTNode)
     c = count(node)
     yi = pi.y
     yj = value(node)
@@ -342,10 +306,10 @@ function f_rep_bh(state::TSNEState, pi::TSNEPoint, node::QTNode)
         c * q2Z2 * (yi - yj)
     else
         (
-            f_rep_bh(state, pi, node.ul) +
-            f_rep_bh(state, pi, node.ur) +
-            f_rep_bh(state, pi, node.ll) +
-            f_rep_bh(state, pi, node.lr)
+            f_rep(state, pi, node.ul) +
+            f_rep(state, pi, node.ur) +
+            f_rep(state, pi, node.ll) +
+            f_rep(state, pi, node.lr)
         )
     end
 end
@@ -381,20 +345,10 @@ function objective(state::TSNEState, Z)
     kl
 end
 
-"""Gradient (N^2)"""
-function gradient_n2(state::TSNEState, i::Sample, Z, exaggeration)
-    #@show f_attr_n2(state, i) - f_attr_bh(state, i)
-    #@show f_rep_n2(state, i, Z) - f_rep_bh(state, i, Z)
-
-    fₐ = f_attr_n2(state, i) * exaggeration
-    fᵣ = f_rep_n2(state, i, Z)
-    4 * (fₐ - fᵣ)
-end
-
 """Gradient (Barnes-Hut)"""
-function gradient_bh(state::TSNEState, i::Sample, Z, exaggeration)
-    fₐ = f_attr_bh(state, i) * exaggeration
-    fᵣ = f_rep_bh(state, i, Z)
+function gradient(state::TSNEState, i::Sample, Z, exaggeration)
+    fₐ = f_attr(state, i) * exaggeration
+    fᵣ = f_rep(state, i, Z)
     4 * (fₐ - fᵣ)
 end
 
@@ -402,7 +356,7 @@ update!(state::TSNEState) = update!(state, keys(state.points))
 
 function update!(state::TSNEState, indices)
 
-    Z = Zterm_bh(state)
+    Z = Zterm(state)
     #println("Z = $Z")
 
     # compute the gradients
@@ -410,7 +364,7 @@ function update!(state::TSNEState, indices)
         pi = state.points[i]
         exaggeration = max(1.0, 4.0 - pi.iterctr * .01)
         #exaggeration = ifelse(pi.iterctr < 100, 4.0, 1.0)
-        pi.∂y = gradient_bh(state, i, Z, exaggeration)
+        pi.∂y = gradient(state, i, Z, exaggeration)
     end
 
     # if more than 1/3 of points are updated,
