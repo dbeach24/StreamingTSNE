@@ -1,6 +1,6 @@
 module VPTrees
 
-import Base: search, insert!, count, collect, delete!
+import Base: search, insert!, count, collect
 
 using DataStructures
 
@@ -8,7 +8,7 @@ export Sample, Radius
 export VPNode, VPTree
 export eachkey, eachnode
 export count, depth, eachkey, eachnode, collect, garbage!
-export make_vp_tree, insert!, search, searchall, closest, delete!
+export make_vp_tree, insert!, search, searchall, closest, remove!
 
 const Sample = Int
 const Radius = Float64
@@ -178,13 +178,13 @@ function insert(n::VPNodePtr, s::Sample, garbage::Vector{Sample}, dist::Function
     end
 end
 
-function delete!(t::VPTree, q::Sample)
-    t.root = delete!(t.root, q, t.garbage, t.dist)
+function remove!(t::VPTree, q::Sample)
+    t.root = remove!(t.root, q, t.garbage, t.dist)
     t
 end
 
-delete!(n::VPNodePtr, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr = !isnull(n) ? delete!(get(n), q, garbage, dist) : nothing
-function delete!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr
+remove!(n::VPNodePtr, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr = !isnull(n) ? remove!(get(n), q, garbage, dist) : nothing
+function remove!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) :: VPNodePtr
     l = n.left
     r = n.right
     if n.p == q
@@ -197,9 +197,9 @@ function delete!(n::VPNode, q::Sample, garbage::Vector{Sample}, dist::Function) 
     end
     x = dist(n.p, q)
     if x < n.μ
-        l = delete!(l, q, garbage, dist)
+        l = remove!(l, q, garbage, dist)
     else
-        r = delete!(r, q, garbage, dist)
+        r = remove!(r, q, garbage, dist)
     end
     check_rebuild(VPNodePtr(make_vp_node(n.p, n.μ, l, r, n.active)), garbage, dist)
 end

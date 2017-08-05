@@ -1,7 +1,8 @@
-
+#!/usr/bin/env julia5
 
 #module OnlineTSNE
 
+using ArgParse
 using ProgressMeter
 using Distributions
 using HDF5
@@ -12,6 +13,7 @@ using SFML
 
 import Base: insert!, count
 import QuadTrees: QTNode, QTNodePtr
+import VPTrees: remove!
 
 const Vec = Vector{Float64}
 const Point = SVector{2, Float64}
@@ -34,7 +36,7 @@ type TSNEPoint
     zterm::Float64
     gain::Point
     iterctr::Int
-    freshness::Float64 # ???
+    staleness::Float64
     β::Float64
     ΣP::Float64
     neighbors::Dict{Int, TSNENeighbor}
@@ -46,6 +48,7 @@ type TSNEState
     perplexity::Float64
     θ::Float64
     dist::Function
+    data::Dict{Int, Vec}
     points::Dict{Int, TSNEPoint}
     vptree::VPTree
     quadtree::QuadTree
@@ -86,7 +89,7 @@ function make_tsne_point(id::Sample, value::Vec)
         0.0,                        # zterm
         SVector(1.0, 1.0),          # gain
         0,                          # iterctr
-        0.0,                        # freshness
+        0.0,                        # staleness
         -1.0,                       # β
         -1.0,                       # ΣP
         Dict{Int, TSNENeighbor}()   # neighbors
@@ -96,10 +99,11 @@ end
 
 function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
 
+    data = Dict{Int, Vec}()
     points = Dict{Int, TSNEPoint}()
 
     dist = cached_distance() do i,j
-        norm(points[i].x .- points[j].x)
+        norm(data[i] .- data[j])
     end
 
     #dist(i,j) = norm(points[i].x .- points[j].x)
@@ -114,6 +118,7 @@ function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
         perplexity,
         θ,
         dist,
+        data,
         points,
         vptree,
         quadtree,
@@ -129,13 +134,40 @@ function insert!(state::TSNEState, value::Vec)
     id = state.nextid
     state.nextid += 1
 
+    state.data[id] = value
     state.points[id] = pi = make_tsne_point(id, value)
     insert!(state.vptree, id)
     insert!(state.quadtree, id, pi.y)
+    id
 end
 
+function remove!(state::TSNEState, i::Sample; neighbor_penalty::Float64=1.0)
 
-function update_neighborhood!(state::TSNEState, i::Sample)
+    points = state.points
+    pi = points[i]
+
+    ΔΣPij = 0.0
+
+    for (j, neighbor) ∈ pi.neighbors
+        pj = points[j]
+        delete!(pj.neighbors, i)
+        pj.staleness += neighbor_penalty
+        ΔΣPij += 2neighbor.pij
+    end
+
+    state.ΣPij -= ΔΣPij
+
+    (zterm, fr) = f_rep(state, i)
+    state.Z -= zterm
+
+    remove!(state.vptree, i)
+    delete!(state.quadtree, i, pi.y)
+    delete!(points, i)
+
+    nothing
+end
+
+function update_neighborhood!(state::TSNEState, i::Sample; neighbor_penalty::Float64=1.0)
     pi = state.points[i]
     β, ΣP, neighbor_dist = solve_neighborhood(state, i; β0 = pi.β)
     pi.β = β
@@ -149,6 +181,7 @@ function update_neighborhood!(state::TSNEState, i::Sample)
         pj = state.points[j]
         ΔΣPij += update_neighbor!(pi, pj, d)
         push!(updated, j)
+        pj.staleness += neighbor_penalty
     end
 
     for (j, neighbor) ∈ pi.neighbors
@@ -156,10 +189,14 @@ function update_neighborhood!(state::TSNEState, i::Sample)
             pj = state.points[j]
             d = neighbor.dist
             ΔΣPij += update_neighbor!(pi, pj, d)
+            pj.staleness += neighbor_penalty
         end
     end
 
     state.ΣPij += ΔΣPij
+
+    pi.staleness = 0.0 # updated point is completely fresh!
+
     nothing
 end
 
@@ -267,7 +304,15 @@ function f_attr(state::TSNEState, i::Sample)
         @assert fmag ≥ 0
         f += (pi.y - pj.y) * fmag
     end
-    f / state.ΣPij
+
+    # normalize attractive forces
+    f /= state.ΣPij
+
+    # add mild attraction to origin
+    # promotes centering and compactness
+    f += (pi.y) * 1e-7
+
+    f
 end
 
 """Repulsive Force (Barnes-Hut)"""
@@ -335,7 +380,7 @@ function update!(state::TSNEState, indices)
 
     # update the forces
     ΔZ = 0.0
-    for i in indices
+    for i ∈ indices
         pi = state.points[i]
         oldzterm = pi.zterm
         pi.fa = f_attr(state, i)
@@ -349,13 +394,14 @@ function update!(state::TSNEState, indices)
 
     # if more than 1/3 of points are updated,
     # just rebuild the quadtree
-    if 3*length(indices) > count(state)
+    if length(indices) == count(state)
+        # we're updating everything... just make a new quadtree
         r = 1000.0
-        newtree = make_quad_tree(Point(-r, -r), Point(r, r))
+        quadtree = make_quad_tree(Point(-r, -r), Point(r, r))
         remove_points = false
     else
         # otherwise, update quadtree in-place
-        newtree = state.QuadTree
+        quadtree = state.quadtree
         remove_points = true
     end
 
@@ -381,58 +427,29 @@ function update!(state::TSNEState, indices)
         pi.Δy = α * pi.Δy - η * (pi.gain .* ∂y)
 
         # update point's state
-        remove_points && delete!(state.quadtree, i, pi.y)
+        remove_points && delete!(quadtree, i, pi.y)
         pi.y += pi.Δy
         pi.iterctr += 1
-        insert!(newtree, i, pi.y)
-
+        insert!(quadtree, i, pi.y)
     end
 
-    state.quadtree = newtree
+    # update quad tree
+    # for x in 1:length(indices)
+    #     i = indices[x]
+    #     remove_points && delete!(quadtree, i, oldy[x])
+    #     pi = state.points[i]
+    #     insert!(quadtree, i, pi.y)
+    # end
+
+    state.quadtree = quadtree
 
     nothing
 end
 
 update_gain(gain, dy, iy) = max(0.01, sign(dy) != sign(iy) ? gain + 0.2 : gain * 0.8)
 
-function load_tsne(X)
-
-    D, N = size(X)
-
-    state = make_tsne_state(perplexity=20., θ=0.8)
-
-    for i ∈ 1:N
-        vec = X[:,i]
-        insert!(state, X[:,i])
-    end
-
-    #Threads.@threads
-    for i ∈ 1:N
-        if mod(i, 10) == 0
-            println("updating neighborhood around point $i")
-        end
-        update_neighborhood!(state, i)
-        #solve_neighborhood(state, i)
-    end
-
-    state
-end    
-
-
-function mainloop(state, labels, iters=1000)
-    window = mkwindow()
-
-    for t ∈ 1:iters
-        if mod(t, 10) == 0
-            println("update #$t   kl=$(objective(state))")
-        end
-        update!(state)
-        view(window, state, labels) || break
-    end
-end
-
-const window_width = 1500
-const window_height = 1500
+const window_width = 2000
+const window_height = 2000
 const hwidth = window_width / 2
 const hheight = window_height / 2
 const colors = [
@@ -447,7 +464,8 @@ const colors = [
     SFML.Color(217,217,217),
     SFML.Color(188,128,189),
 ]
-const viewscale = 100
+const halocolor = SFML.Color(0,127,0)
+const viewscale = 40
 
 function mkdot(x, y; r=8, label=1)
     dot = CircleShape()
@@ -472,7 +490,7 @@ function vec2screen(vec::Point)
     Point(sx, sy)
 end
 
-function view(window, state, labels)
+function view(window, state, labels; miniters::Int=0, newiters::Int=30)
 
     event = Event()
 
@@ -486,7 +504,15 @@ function view(window, state, labels)
     clear(window, SFML.white)
 
     for point in values(state.points)
+        point.iterctr < miniters && continue
+
         xy = vec2screen(point.y)
+        if point.iterctr < (miniters + newiters)
+            halo = mkdot(xy[:1], xy[:2]; r=16)
+            set_fillcolor(halo, halocolor)
+            draw(window, halo)
+        end
+
         dot = mkdot(xy[:1], xy[:2]; r=8, label=labels[point.id]+1)
         draw(window, dot)
     end
@@ -496,26 +522,176 @@ function view(window, state, labels)
 
 end
 
-function main(fname)
+function reposition!(state::TSNEState, i::Sample; miniters::Int=500)
+    pi = state.points[i]
+    avgy = Point(0.0, 0.0)
+    ct = 0
+    for (j, d) in closest(state.vptree, i, floor(state.perplexity))
+        pj = state.points[j]
+        if pj.iterctr > miniters
+            ct += 1
+            avgy += pj.y
+        end
+        ct == 3 && break
+    end
+    if ct >= 3
+        avgy = avgy / ct
+        delete!(state.quadtree, pi.id, pi.y)
+        pi.y = avgy
+        insert!(state.quadtree, pi.id, pi.y)
+    end
+    nothing
+end
+
+function run_beach_tsne(X, labels;
+        init_size=100,
+        window_size=1000,
+        iterations=600,
+        perplexity=20.0,
+        θ=0.8,
+        miniters=300,
+        newiters=20
+)
+
+    D, N = size(X)
+
+    # interface for fetching rows of X
+    xrow = 0
+    nextitem() = (xrow += 1; X[:,xrow])
+    eof() = (xrow >= N)
+
+    # construct TSNE state
+    state = make_tsne_state(perplexity=perplexity, θ=θ)
+
+    window = mkwindow()
+
+    doview() = view(window, state, labels; miniters=miniters, newiters=newiters)
+
+    # load initial data
+    @showprogress 1 "Inserting initial points" for i ∈ 1:init_size
+        eof() && break
+        insert!(state, nextitem())
+    end
+
+    # update initial neighborhoods
+    @showprogress 1 "Computing point perplexities" for i ∈ 1:init_size
+        eof() && break
+        update_neighborhood!(state, i; neighbor_penalty=0.0)
+    end
+
+    # initial convergence
+    @showprogress 1 "Initial convergence" for t ∈ 1:iterations
+        update!(state)
+        doview() || return
+        if t % 20 == 0
+            println("t=$t  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))")
+        end
+    end
+
+    # window cycling phase
+    nnupdates = 0
+    @showprogress 1 "Cycling window" for t=1:(N-init_size)
+
+        while count(state) >= window_size
+            remove!(state, 1 + xrow - window_size)
+        end
+
+        insert!(state, nextitem())
+        update_neighborhood!(state, xrow)
+        reposition!(state, xrow; miniters=200)
+
+        # determine which points to update
+        #update_pts = Vector{Int}()
+        logs = log(rand())
+        for (i, point) ∈ state.points
+            # update neighborhood
+            if point.staleness > 3perplexity
+               update_neighborhood!(state, point.id; neighbor_penalty=0.0)
+               nnupdates += 1
+            end
+            #logp = -min(point.iterctr, iterations) / 0.5iterations
+            #(logs < logp) && push!(update_pts, point.id)
+        end
+
+
+        #update!(state, update_pts)
+
+        if t % 20 == 0
+            println("t=$t  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))  nnupdates=$nnupdates")
+        end
+
+        update!(state)
+
+        doview() || return
+    end
+
+    # final convergence
+    @showprogress 1 "Final convergence" for t ∈ 1:iterations
+
+        if t % 20 == 0
+            println("t=$t  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))")
+        end
+
+        update!(state)
+        doview() || return
+    end
+
+    nothing
+
+end
+
+
+function main()
+    s = ArgParseSettings(description = "beach_tsne.jl")
+
+    @add_arg_table s begin
+        "infile"
+        "--init-size"
+            arg_type = Int
+            default = 100
+        "--window-size"
+            arg_type = Int
+            default = 1000
+        "--iterations"
+            arg_type = Int
+            default = 600
+        "--perplexity"
+            arg_type = Float64
+            default = 20.0
+        "--theta"
+            arg_type = Float64
+            default = 0.8
+        "--min-iters"
+            arg_type = Int
+            default = 300
+        "--new-iters"
+            arg_type = Int
+            default = 20
+    end
+
+    args = parse_args(s)
+
+    fname = args["infile"]
     X = map(Float64, h5read(fname, "X"))
     labels = h5read(fname, "labels")
 
     # normalize pixel values to 0..1
     X ./= 255.0
 
-    # Z-score normalization seems like a bad idea for this data!
-    # for d in 1:size(X,1)
-    #     sd = std(X[d,:])
-    #     if sd > 0
-    #         X[d,:] ./= sd
-    #     end
-    # end
-    state = load_tsne(X)
-    mainloop(state, labels)
-    state
+    run_beach_tsne(X, labels;
+        init_size=args["init-size"],
+        window_size=args["window-size"],
+        iterations=args["iterations"],
+        perplexity=args["perplexity"],
+        miniters=args["min-iters"],
+        newiters=args["new-iters"],
+    )
+
 end
 
-state = main("../samples/mnist_2000.h5")
+
+main()
+
 
 #end # module
 

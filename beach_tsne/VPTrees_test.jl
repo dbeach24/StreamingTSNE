@@ -51,7 +51,7 @@ end
     @test sort!(collect(tree)) == add_ids
 
     for i in [1, 3, 5, 7, 9]
-        delete!(tree, i)
+        remove!(tree, i)
     end
     @test sort!(collect(tree)) == [2, 4, 6, 8, 10]
 
@@ -80,7 +80,7 @@ end
         push!(data, i)
     end
     @time for i in stuff
-        delete!(tree, i - 10000)
+        remove!(tree, i - 10000)
         @assert count(tree) == 9999
         insert!(tree, i)
         @assert count(tree) == 10000
@@ -96,7 +96,7 @@ end
 
     # println("Deleting 10000 nodes (every other sample)")
     # @time for i in 1:2:20000
-    #     delete!(tree, i)
+    #     remove!(tree, i)
     # end
 
     # @test sort!(collect(tree)) == collect(2:2:20000)
