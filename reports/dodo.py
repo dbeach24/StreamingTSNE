@@ -18,7 +18,7 @@ def make_pdf(mdfile, pdf, toc=False):
 
     if toc:
         args.append("--toc")
-        args.append("--tod-depth 2")
+        args.append("--toc-depth 2")
 
     args += [
         "--mathjax",
@@ -44,3 +44,6 @@ def task_data():
     yield make_pdf("Progress1.md", "pdf/Progress1.pdf")
     yield make_pdf("Critique.md", "pdf/Critique.pdf", toc=False)
     yield make_pdf("Progress2.md", "pdf/Progress2.pdf")
+
+    yield make_pdf("FinalReport.md", "pdf/FinalReport.pdf", toc=True)
+
