@@ -31,8 +31,6 @@ type TSNEPoint
     x::Vec
     y::Point
     Δy::Point
-    fa::Point
-    fr::Point
     zterm::Float64
     gain::Point
     iterctr::Int
@@ -84,8 +82,6 @@ function make_tsne_point(id::Sample, value::Vec)
         value,                      # x
         pt,                         # y
         SVector(0.0, 0.0),          # Δy
-        SVector(0.0, 0.0),          # fa
-        SVector(0.0, 0.0),          # fr
         0.0,                        # zterm
         SVector(1.0, 1.0),          # gain
         0,                          # iterctr
@@ -102,17 +98,17 @@ function make_tsne_state(; niters=1000, perplexity=20.0, θ=0.5)
     data = Dict{Int, Vec}()
     points = Dict{Int, TSNEPoint}()
 
-    #dist = cached_distance() do i,j
-    #    norm(data[i] .- data[j])
-    #end
+    dist = cached_distance() do i,j
+        norm(data[i] .- data[j])
+    end
 
-    dist(i,j) = norm(data[i] .- data[j])
+    #dist(i,j) = norm(points[i].x .- points[j].x)
 
     vptree = make_vp_tree(dist)
     quadtree = make_quad_tree(Point(-1000.0, -1000.0), Point(1000.0, 1000.0))
     nextid = 1
     ΣPij = 0.0
-    Z = 0.0
+    Z = -1.0
     state = TSNEState(
         niters,
         perplexity,
@@ -142,6 +138,8 @@ function insert!(state::TSNEState, value::Vec)
 end
 
 function remove!(state::TSNEState, i::Sample; neighbor_penalty::Float64=1.0)
+
+    i ∈ keys(state.points) || error("no such point in tree!")
 
     points = state.points
     pi = points[i]
@@ -195,8 +193,7 @@ function update_neighborhood!(state::TSNEState, i::Sample; neighbor_penalty::Flo
 
     state.ΣPij += ΔΣPij
 
-    # updated point is now completely fresh!
-    pi.staleness = 0.0
+    pi.staleness = 0.0 # updated point is completely fresh!
 
     nothing
 end
@@ -205,7 +202,7 @@ end
 function solve_neighborhood(state::TSNEState, i::Sample;
                             β0::Number=-1, max_iter::Int=50, tol::Number=1e-5)
 
-    # NOTE: This loop solves for σ in terms of β
+    # NOTE: This loop solves for sigma (σ) in terms of beta (β)
     # where β = 1 / 2σ^2
     # σ = sqrt(1 / 2β)
 
@@ -316,6 +313,50 @@ function f_attr(state::TSNEState, i::Sample)
     f
 end
 
+"""Dual-Tree Algorithm for computing Z."""
+get_zterm(state::TSNEState) = get_zterm(state, state.quadtree.root, state.quadtree.root)
+get_zterm(state::TSNEState, ni::QTNodePtr, nj::QTNodePtr) = (
+    (isnull(ni) || isnull(nj)) ? 0.0 : get_zterm(state, get(ni), get(nj))
+)
+get_zterm(state::TSNEState, ni::QTNodePtr, nj::QTNode) = isnull(ni) ? 0.0 : get_zterm(state, get(ni), nj)
+get_zterm(state::TSNEState, ni::QTNode, nj::QTNodePtr) = isnull(nj) ? 0.0 : get_zterm(state, ni, get(nj))
+
+function get_zterm(state::TSNEState, ni::QTNode, nj::QTNode)
+    cni = count(ni)
+    cnj = count(nj)
+
+    if cni == 0 || cnj == 0
+        zterm = 0.0
+    elseif cni == cnj == 1
+        if ni.id != nj.id
+            zterm = qij(value(ni), value(nj))
+        else
+            zterm = 0.0
+        end
+    elseif bh_eligible(state, ni, nj)
+        zterm = cni * cnj * qij(value(ni), value(nj))
+    else
+        dni = xydist2(ni.p1, ni.p2)
+        dnj = xydist2(nj.p1, nj.p2)
+        if dni > dnj && cni > 1
+            zterm = (
+                get_zterm(state, ni.ul, nj) +
+                get_zterm(state, ni.ur, nj) +
+                get_zterm(state, ni.ll, nj) +
+                get_zterm(state, ni.lr, nj)
+            )
+        else
+            zterm = (
+                get_zterm(state, ni, nj.ul) +
+                get_zterm(state, ni, nj.ur) +
+                get_zterm(state, ni, nj.ll) +
+                get_zterm(state, ni, nj.lr)
+            )
+        end
+    end
+    zterm
+end
+
 """Repulsive Force (Barnes-Hut)"""
 f_rep(state::TSNEState, i::Sample) = f_rep(state, state.points[i], state.quadtree.root)
 f_rep(state::TSNEState, pi::TSNEPoint, n::QTNodePtr) = isnull(n) ? (0.0, SVector(0.0, 0.0)) : f_rep(state, pi, get(n))
@@ -350,6 +391,12 @@ function bh_eligible(state::TSNEState, pi::TSNEPoint, node::QTNode)
     (r2_cell / y2_cell) < state.θ^2
 end
 
+function bh_eligible(state::TSNEState, ni::QTNode, nj::QTNode)
+    r2 = max(xydist2(ni.p1, ni.p2), xydist2(nj.p1, nj.p2))
+    y2 = xydist2(value(ni), value(nj))
+    (r2 / y2) < state.θ^2
+end
+
 
 function objective(state::TSNEState)
     ΣPij = state.ΣPij
@@ -377,45 +424,37 @@ end
 
 update!(state::TSNEState) = update!(state, keys(state.points))
 
-function update!(state::TSNEState, indices)
+function update!(state::TSNEState, idxs)
 
-    # update the forces
-    ΔZ = 0.0
-    for i ∈ indices
-        pi = state.points[i]
-        oldzterm = pi.zterm
-        pi.fa = f_attr(state, i)
-        (zterm, fr) = f_rep(state, i)
-        pi.fr = fr
-        pi.zterm = zterm
-        ΔZ += zterm - oldzterm
-    end
-    state.Z += ΔZ
-    Z = state.Z
-
-    if length(indices) == count(state)
-        # we're updating everything... just make a new quadtree
-        r = 1000.0
-        quadtree = make_quad_tree(Point(-r, -r), Point(r, r))
-        remove_points = false
-    else
-        # otherwise, update quadtree in-place
-        quadtree = state.quadtree
-        remove_points = true
-    end
+    indices = collect(idxs)
+    N = length(indices)
+    T = Threads.nthreads()
 
     η = 500.0 # learning rate
 
-    # update point states
-    for i in indices
+    # update the forces    
+    Z = state.Z = get_zterm(state)
+    if Z <= 0.0
+        Z = get_zterm(state)
+        state.Z = Z
+    end
+    #println("Z = $Z !!!!!")
+    #ΔZ = zeros(T * 10)
+    @Threads.threads for x in 1:N
+        i = indices[x]
         pi = state.points[i]
+        oldzterm = pi.zterm
+        fa = f_attr(state, i)
+        (zterm, fr) = f_rep(state, i)
+        pi.zterm = zterm
+        #ΔZ[Threads.threadid() * 10] += zterm - oldzterm
+
         α = ifelse(pi.iterctr < 50, 0.5, 0.8)
 
         exaggeration = max(1.0, 4.0 - pi.iterctr * .01)
-        #exaggeration = ifelse(pi.iterctr < 100, 4.0, 1.0)
 
         # compute gradient
-        ∂y = 4 * (pi.fa * exaggeration - pi.fr / Z)
+        ∂y = 4 * (fa * exaggeration - fr / Z)
 
         # update gain
         g1 = update_gain(pi.gain[:1], ∂y[:1], pi.Δy[:1])
@@ -425,14 +464,34 @@ function update!(state::TSNEState, indices)
         # compute updated velocity
         pi.Δy = α * pi.Δy - η * (pi.gain .* ∂y)
 
-        # update point's state
-        remove_points && delete!(quadtree, i, pi.y)
-        pi.y += pi.Δy
-        pi.iterctr += 1
-        insert!(quadtree, i, pi.y)
     end
+    #state.Z += sum(ΔZ)
 
-    state.quadtree = quadtree
+
+    if N == count(state)
+        # we're updating everything... just make a new quadtree
+        r = 1000.0
+        quadtree = make_quad_tree(Point(-r, -r), Point(r, r))
+        for x in 1:N
+            i = indices[x]
+            pi = state.points[i]
+            pi.y += pi.Δy
+            pi.iterctr += 1
+            insert!(quadtree, i, pi.y)
+        end
+        state.quadtree = quadtree
+    else
+        # otherwise, update quadtree in-place
+        quadtree = state.quadtree
+        for x in 1:N
+            i = indices[x]
+            pi = state.points[i]
+            delete!(quadtree, i, pi.y)
+            pi.y += pi.Δy
+            pi.iterctr += 1
+            insert!(quadtree, i, pi.y)
+        end
+    end
 
     nothing
 end
@@ -486,23 +545,9 @@ function view(window, state, labels; miniters::Int=0, newiters::Int=30)
     event = Event()
 
     while pollevent(window, event)
-        etype = get_type(event)
-        if etype == EventType.CLOSED
+        if get_type(event) == EventType.CLOSED
             close(window)
             return false
-        elseif etype == EventType.KEY_PRESSED
-
-            println("scenario paused")
-            while true
-                pollevent(window, event)
-                if get_type(event) == EventType.KEY_PRESSED
-                    break
-                end
-                sleep(0.05)
-            end
-
-            println("resuming...")
-
         end
     end
 
@@ -555,7 +600,8 @@ function run_beach_tsne(X, labels;
         perplexity=20.0,
         θ=0.8,
         miniters=300,
-        newiters=20
+        newiters=20,
+        viewfps=30,
 )
 
     D, N = size(X)
@@ -569,8 +615,18 @@ function run_beach_tsne(X, labels;
     state = make_tsne_state(perplexity=perplexity, θ=θ)
 
     window = mkwindow()
+    lastview = time()
+    viewrate = 1. / viewfps
 
-    doview() = view(window, state, labels; miniters=miniters, newiters=newiters)
+    function doview()
+        t = time()
+        res = true
+        if (t - lastview) > viewrate
+            res = view(window, state, labels; miniters=miniters, newiters=newiters)
+            lastview = t
+        end
+        res
+    end
 
     # load initial data
     @showprogress 1 "Inserting initial points" for i ∈ 1:init_size
@@ -603,14 +659,14 @@ function run_beach_tsne(X, labels;
 
         insert!(state, nextitem())
         update_neighborhood!(state, xrow)
-        #reposition!(state, xrow; miniters=200)
+        reposition!(state, xrow; miniters=200)
 
         # determine which points to update
         #update_pts = Vector{Int}()
-        logs = log(rand())
+        #logs = log(rand())
         for (i, point) ∈ state.points
             # update neighborhood
-            if point.staleness > perplexity
+            if point.staleness > 3perplexity
                update_neighborhood!(state, point.id; neighbor_penalty=0.0)
                nnupdates += 1
             end
@@ -618,14 +674,13 @@ function run_beach_tsne(X, labels;
             #(logs < logp) && push!(update_pts, point.id)
         end
 
-
         #update!(state, update_pts)
+        update!(state)
 
         if t % 20 == 0
             println("t=$t  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))  nnupdates=$nnupdates")
         end
 
-        update!(state)
 
         doview() || return
     end
@@ -644,62 +699,6 @@ function run_beach_tsne(X, labels;
     nothing
 
 end
-
-function run_bh_tsne(infile, outfile; iterations=1000, perplexity=20.0, θ=0.8)
-
-    X = map(Float64, h5read(infile, "X"))
-    X ./= 255.0
-    labels = h5read(infile, "labels")
-
-    D, N = size(X)
-
-    start = time()
-
-    # construct TSNE state
-    state = make_tsne_state(perplexity=perplexity, θ=θ)
-
-    for i = 1:N
-        insert!(state, X[:,i])
-    end
-    for i = 1:N
-        if i % 20 == 0
-            println("updating neighborhood about point $i")
-        end
-        update_neighborhood!(state, i; neighbor_penalty=0.0)
-    end
-    for t = 1:iterations
-        update!(state)
-        if t % 20 == 0
-            println("iteration $t, kl = $(objective(state))")
-        end
-    end
-
-    last_kldiv = objective(state)
-
-    stop = time()
-
-    Y = zeros(2,N)
-    for i = 1:N
-        pi = state.points[i]
-        Y[1,i] = pi.y[:1]
-        Y[2,i] = pi.y[:2]
-    end
-
-    h5open(outfile, "w") do file
-        write(file, "Y", Y)
-        write(file, "labels", labels)
-        attrs(file)["algo"] = "Julia BH Stream"
-        attrs(file)["input"] = infile
-        attrs(file)["time"] = (stop - start)
-        attrs(file)["error"] = last_kldiv
-    end
-
-    # compensate for broken Python HDF5
-    # (by writing string attributes using Python!)
-    run(`../bench/h5writeattr.py $(abspath(outfile)) "algo=Julia BH Stream" "input=$(infile)"`)
-
-end
-
 
 
 function main()
@@ -728,43 +727,31 @@ function main()
         "--new-iters"
             arg_type = Int
             default = 20
-        "--output"
-            arg_type = String
-            default = ""
     end
 
     args = parse_args(s)
 
-    if args["output"] != ""
-        run_bh_tsne(
-            args["infile"],
-            args["output"];
-            iterations=args["iterations"],
-            perplexity=args["perplexity"]
-        )
-    else
+    fname = args["infile"]
+    X = map(Float64, h5read(fname, "X"))
+    labels = h5read(fname, "labels")
 
-        fname = args["infile"]
-        X = map(Float64, h5read(fname, "X"))
-        labels = h5read(fname, "labels")
+    # normalize pixel values to 0..1
+    X ./= 255.0
 
-        # normalize pixel values to 0..1
-        X ./= 255.0
-
-        run_beach_tsne(X, labels;
-            init_size=args["init-size"],
-            window_size=args["window-size"],
-            iterations=args["iterations"],
-            perplexity=args["perplexity"],
-            miniters=args["min-iters"],
-            newiters=args["new-iters"],
-        )
-
-    end
+    run_beach_tsne(X, labels;
+        init_size=args["init-size"],
+        window_size=args["window-size"],
+        iterations=args["iterations"],
+        perplexity=args["perplexity"],
+        miniters=args["min-iters"],
+        newiters=args["new-iters"],
+    )
 
 end
 
+
 main()
+
 
 #end # module
 
