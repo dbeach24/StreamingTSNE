@@ -439,8 +439,8 @@ end
 
 update_gain(gain, dy, iy) = max(0.01, sign(dy) != sign(iy) ? gain + 0.2 : gain * 0.8)
 
-const window_width = 2000
-const window_height = 2000
+const window_width = 1000
+const window_height = 1000
 const hwidth = window_width / 2
 const hheight = window_height / 2
 const colors = [
@@ -458,7 +458,7 @@ const colors = [
 const halocolor = SFML.Color(0,127,0)
 const viewscale = 40
 
-function mkdot(x, y; r=8, label=1)
+function mkdot(x, y; r=4, label=1)
     dot = CircleShape()
     set_position(dot, Vector2f(x, y))
     set_radius(dot, r)
@@ -513,12 +513,12 @@ function view(window, state, labels; miniters::Int=0, newiters::Int=30)
 
         xy = vec2screen(point.y)
         if point.iterctr < (miniters + newiters)
-            halo = mkdot(xy[:1], xy[:2]; r=16)
+            halo = mkdot(xy[:1], xy[:2]; r=8)
             set_fillcolor(halo, halocolor)
             draw(window, halo)
         end
 
-        dot = mkdot(xy[:1], xy[:2]; r=8, label=labels[point.id]+1)
+        dot = mkdot(xy[:1], xy[:2]; r=4, label=labels[point.id]+1)
         draw(window, dot)
     end
 
@@ -555,7 +555,8 @@ function run_beach_tsne(X, labels;
         perplexity=20.0,
         θ=0.8,
         miniters=300,
-        newiters=20
+        newiters=20,
+        addrate=1.0,
 )
 
     D, N = size(X)
@@ -595,15 +596,23 @@ function run_beach_tsne(X, labels;
 
     # window cycling phase
     nnupdates = 0
-    @showprogress 1 "Cycling window" for t=1:(N-init_size)
+    numadd = 0.0
+    t = 0
+    while true
 
-        while count(state) >= window_size
-            remove!(state, 1 + xrow - window_size)
+        eof() && break
+
+        t += 1
+        numadd += addrate
+
+        while numadd > 1.0
+            while count(state) >= window_size
+                remove!(state, 1 + xrow - window_size)
+            end
+            insert!(state, nextitem())
+            update_neighborhood!(state, xrow)
+            numadd -= 1.0
         end
-
-        insert!(state, nextitem())
-        update_neighborhood!(state, xrow)
-        #reposition!(state, xrow; miniters=200)
 
         # determine which points to update
         #update_pts = Vector{Int}()
@@ -620,12 +629,11 @@ function run_beach_tsne(X, labels;
 
 
         #update!(state, update_pts)
+        update!(state)
 
         if t % 20 == 0
-            println("t=$t  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))  nnupdates=$nnupdates")
+            println("t=$t  x=$xrow  count=$(count(state))  vpdepth=$(depth(state.vptree))  kl=$(objective(state))  nnupdates=$nnupdates")
         end
-
-        update!(state)
 
         doview() || return
     end
@@ -728,6 +736,9 @@ function main()
         "--new-iters"
             arg_type = Int
             default = 20
+        "--add-rate"
+            arg_type = Float64
+            default = 1.0
         "--output"
             arg_type = String
             default = ""
@@ -758,6 +769,7 @@ function main()
             perplexity=args["perplexity"],
             miniters=args["min-iters"],
             newiters=args["new-iters"],
+            addrate=args["add-rate"],
         )
 
     end
