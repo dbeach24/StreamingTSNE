@@ -23,7 +23,7 @@ function Hbeta!(P::AbstractVector, D::AbstractVector, beta::Number)
         @inbounds P[j] = exp(-beta * D[j])
     end
     sumP = sum(P)
-    @assert (isfinite(sumP) && sumP > 0.0) "Degenerated P[$i]: sum=$sumP, beta=$beta"
+    @assert (isfinite(sumP) && sumP > 0.0) "Degenerated P: sum=$sumP, beta=$beta"
     H = log(sumP) + beta * dot(D, P) / sumP
     @assert isfinite(H) "Degenerated H"
     scale!(P, 1/sumP)
@@ -45,6 +45,11 @@ function perplexities(X::Matrix, tol::Number = 1e-5, perplexity::Number = 30.0;
     (n, d) = size(X)
     sum_XX = sum(abs2, X, 2)
     D = -2 * (X*X') .+ sum_XX .+ sum_XX' # euclidean distances between the points
+    @show sum(X[1,:])
+    @show sum(X[2,:])
+    @show D[1,1]
+    @show D[1,2]
+    @show D[2,1]
     P = zeros(Float64, n, n) # perplexities matrix
     beta = ones(Float64, n)  # vector of Normal distribution precisions for each point
     logU = log(perplexity) # the log of expected perplexity
@@ -90,6 +95,7 @@ function perplexities(X::Matrix, tol::Number = 1e-5, perplexity::Number = 30.0;
         P[:, i] = Pcol
         beta[i] = betai
     end
+    println("Beta = $(beta)")
     progress && finish!(pb)
     # Return final P-matrix
     verbose && info("Mean σ=$(mean(sqrt.(1 ./ beta)))")
@@ -156,12 +162,13 @@ function tsne(X::Matrix, ndims::Integer = 2, reduce_dims::Integer = 0,
 
     # Initialize variables
     T = eltype(X)
-    X = X * (one(T)/(std(X)::T)) # note that X is copied
-    if 0<reduce_dims<size(X, 2)
-        reduce_dims = max(reduce_dims, ndims)
-        verbose && info("Preprocessing the data using PCA...")
-        X = pca(X, reduce_dims)
-    end
+    X ./= 255.0
+    #X = X * (one(T)/(std(X)::T)) # note that X is copied
+    # if 0<reduce_dims<size(X, 2)
+    #     reduce_dims = max(reduce_dims, ndims)
+    #     verbose && info("Preprocessing the data using PCA...")
+    #     X = pca(X, reduce_dims)
+    # end
     (n, d) = size(X)
     if !pca_init
         verbose && info("Starting with random layout...")
